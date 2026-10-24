@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="TrainHub — 单节点模型训练管理台" />
+    <title>TrainHub</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23123c33'/%3E%3Cg fill='none' stroke='%23f0f4ec' stroke-width='1.6' stroke-linecap='round'%3E%3Crect x='4.6' y='4.6' width='14.8' height='14.8' rx='3'/%3E%3Cpath d='M8.2 9.2h7.6M8.2 12.4h4.6'/%3E%3C/g%3E%3Ccircle cx='15.9' cy='15.6' r='1.25' fill='%23c49a3a'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <script>
+      try {
+        document.documentElement.dataset.theme =
+          localStorage.getItem("trainhub.theme") === "dark" ? "dark" : "light";
+      } catch (error) {
+        document.documentElement.dataset.theme = "light";
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="toast-root" class="toast-root" role="status" aria-live="polite"></div>
+    <noscript>
+      <div style="padding: 40px; font-family: sans-serif">
+        TrainHub 需要启用 JavaScript 才能使用。
+      </div>
+    </noscript>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

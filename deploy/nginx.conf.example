@@ -1,0 +1,35 @@
+# TrainHub 反向代理示例。
+# 令牌是长期凭据：只通过 HTTPS 暴露。
+#
+# 部署时把证书路径替换为节点上的真实证书，并按需加访问控制。
+
+server {
+    listen 443 ssl http2;
+    server_name trainhub.example.com;
+
+    ssl_certificate     /etc/nginx/tls/trainhub.example.com.pem;
+    ssl_certificate_key /etc/nginx/tls/trainhub.example.com.key;
+
+    # 数据集上传可能很大：按 TRAINHUB_MAX_DATASET_MB 调整
+    client_max_body_size 10240m;
+    client_body_timeout  300s;
+
+    # 训练日志轮询是短请求，关闭代理缓冲更顺滑
+    proxy_http_version 1.1;
+    proxy_set_header   Host              $host;
+    proxy_set_header   X-Real-IP         $remote_addr;
+    proxy_set_header   X-Forwarded-For   $remote_addr;
+    proxy_set_header   X-Forwarded-Proto $scheme;
+    proxy_read_timeout 300s;
+    proxy_buffering    off;
+
+    location / {
+        proxy_pass http://127.0.0.1:7470;
+    }
+}
+
+server {
+    listen 80;
+    server_name trainhub.example.com;
+    return 301 https://$host$request_uri;
+}

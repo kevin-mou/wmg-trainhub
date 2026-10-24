@@ -1,0 +1,14 @@
+[project]
+name = "wmg-trainhub"
+version = "0.1.0"
+description = "Kaggle-style single-node model training console"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]

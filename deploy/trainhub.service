@@ -1,0 +1,20 @@
+[Unit]
+Description=TrainHub model training console
+After=network.target
+
+[Service]
+Type=simple
+User=trainhub
+Group=trainhub
+WorkingDirectory=/opt/trainhub/wmg-trainhub
+Environment=PYTHONPATH=/opt/trainhub/wmg-trainhub/src
+EnvironmentFile=-/etc/trainhub/trainhub.env
+ExecStart=/opt/trainhub/wmg-trainhub/.venv/bin/python -m trainhub.cli serve --host 0.0.0.0 --port 7470
+Restart=always
+RestartSec=3
+
+# 训练内核会占用较多文件句柄与内存，按节点规格调整
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
