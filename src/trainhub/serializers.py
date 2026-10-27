@@ -103,6 +103,13 @@ def run_public(row: dict[str, Any], *, has_logs: bool | None = None) -> dict[str
         "startedAt": row.get("started_at"),
         "finishedAt": row.get("finished_at"),
         "durationSeconds": duration,
+        "origin": row.get("origin") or "customer",
+        "controlJobId": row.get("control_job_id"),
+        "codeSha256": row.get("code_sha256"),
+        "datasetSha256": row.get("dataset_sha256"),
+        "assetsSha256": row.get("assets_sha256"),
+        "baseModel": row.get("base_model"),
+        "entry": row.get("entry"),
     }
     if has_logs is not None:
         data["hasLogs"] = has_logs

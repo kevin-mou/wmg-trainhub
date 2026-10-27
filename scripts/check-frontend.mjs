@@ -19,6 +19,7 @@ const files = [
   "api.js",
   "ui.js",
   "i18n.js",
+  "metrics-chart.js",
   ...fs
     .readdirSync(pagesDir)
     .filter((name) => name.endsWith(".js"))

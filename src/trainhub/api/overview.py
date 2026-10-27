@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 
 from ..config import Settings
 from ..db import Database
-from ..kernels import jupyter_available, list_kernels, resolve_default_kernel
+from ..kernels import default_kernel_name, jupyter_available, list_kernels
 from ..responses import ok
 from ..serializers import customer_public, run_public
 from ..storage import Storage
@@ -81,7 +81,7 @@ def kernels(
     return ok(
         {
             "kernels": available,
-            "default": resolve_default_kernel(settings),
+            "default": default_kernel_name(),
             "jupyterAvailable": jupyter_available(),
         }
     )

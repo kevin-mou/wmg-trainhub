@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from ..config import Settings
-from ..kernels import jupyter_available, list_kernels, resolve_default_kernel
+from ..kernels import default_kernel_name, jupyter_available, list_kernels
 from ..responses import ok
 from .deps import current_customer, get_settings
 
@@ -26,6 +26,6 @@ def health(
             "status": "ok",
             "jupyterAvailable": jupyter_available(),
             "kernelCount": len(kernels),
-            "defaultKernel": resolve_default_kernel(settings),
+            "defaultKernel": default_kernel_name(),
         }
     )

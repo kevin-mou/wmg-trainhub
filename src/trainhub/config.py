@@ -68,9 +68,10 @@ class Settings:
     cell_timeout_seconds: int
     max_dataset_mb: int
     max_notebook_mb: int
+    max_code_mb: int
+    max_assets_mb: int
     max_log_mb: int
     keep_run_workdir: bool
-    default_kernel: str
     log_level: str
 
     @property
@@ -80,6 +81,14 @@ class Settings:
     @property
     def max_notebook_bytes(self) -> int:
         return self.max_notebook_mb * 1024 * 1024
+
+    @property
+    def max_code_bytes(self) -> int:
+        return self.max_code_mb * 1024 * 1024
+
+    @property
+    def max_assets_bytes(self) -> int:
+        return self.max_assets_mb * 1024 * 1024
 
     @property
     def max_log_bytes(self) -> int:
@@ -104,8 +113,9 @@ class Settings:
             cell_timeout_seconds=_int_env("TRAINHUB_CELL_TIMEOUT_SECONDS", 0),
             max_dataset_mb=_int_env("TRAINHUB_MAX_DATASET_MB", 10240),
             max_notebook_mb=_int_env("TRAINHUB_MAX_NOTEBOOK_MB", 10),
+            max_code_mb=_int_env("TRAINHUB_MAX_CODE_MB", 200),
+            max_assets_mb=_int_env("TRAINHUB_MAX_ASSETS_MB", 10240),
             max_log_mb=_int_env("TRAINHUB_MAX_LOG_MB", 100),
             keep_run_workdir=_bool_env("TRAINHUB_KEEP_RUN_WORKDIR", False),
-            default_kernel=(os.environ.get("TRAINHUB_DEFAULT_KERNEL") or "python3").strip(),
             log_level=os.environ.get("TRAINHUB_LOG_LEVEL", "info").lower(),
         )

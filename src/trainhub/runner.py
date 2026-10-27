@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import shutil
 import time
+import zipfile
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -14,8 +16,9 @@ from typing import Any
 
 from .config import Settings
 from .db import Database
+from .environment import environment_snapshot
 from .kernels import list_kernels
-from .storage import Storage, iter_files
+from .storage import Storage, extract_zip_safe, iter_files
 from .utils import truncate
 
 logger = logging.getLogger("trainhub.runner")
@@ -125,7 +128,7 @@ def _streaming_client_class() -> type:
 
 
 class RunLogWriter:
-    """训练日志落盘：逐行加时间戳，有大小上限。"""
+    """训练日志落盘：逐行加时间戳，有大小上限；可选镜像到任务日志回调。"""
 
     def __init__(self, path: Path, max_bytes: int) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -201,6 +204,8 @@ class RunExecutor:
         self._cancel_requested: set[str] = set()
         self._stopping = False
         self._started = False
+        # 节点执行槽：客户 Notebook 训练与平台推送作业共享同一并发额度
+        self.slot = asyncio.Semaphore(max(1, settings.max_concurrent_runs))
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -274,7 +279,9 @@ class RunExecutor:
             task = asyncio.create_task(self._execute(run_id), name=f"trainhub-run-{run_id}")
             self._active_tasks[run_id] = task
             try:
-                await task
+                # 与平台作业共享执行槽：平台作业运行期间客户训练在此排队
+                async with self.slot:
+                    await task
             except asyncio.CancelledError:
                 if self._stopping:
                     raise
@@ -312,6 +319,8 @@ class RunExecutor:
         workdir = self._storage.run_work_dir(customer_id, run_id)
         output_dir = self._storage.run_output_dir(customer_id, run_id)
         log_path = self._storage.run_log_path(customer_id, run_id)
+        metrics_path = self._storage.run_metrics_path(customer_id, run_id)
+        environment_path = self._storage.run_environment_path(customer_id, run_id)
         home_dir = self._storage.run_home_dir(customer_id, run_id)
         tmp_dir = self._storage.run_tmp_dir(customer_id, run_id)
 
@@ -342,34 +351,104 @@ class RunExecutor:
             bits = _jupyter_bits()
             nbformat = bits.nbformat
 
-            notebook = self._db.get_notebook_any(run["notebook_id"])
-            if notebook is None:
-                raise RuntimeError("Notebook 不存在（可能在排队期间被删除）")
-            source_path = Path(notebook["storage_path"])
-            if not source_path.is_file():
-                raise RuntimeError("Notebook 源文件缺失，请重新上传")
-            shutil.copy2(source_path, workdir / "notebook.ipynb")
+            bundle_mode = bool(run.get("code_archive_path"))
+            if bundle_mode:
+                writer.line(
+                    f"来源：平台执行（控制面作业 {run.get('control_job_id') or '-'}）；"
+                    f"代码 sha256 {str(run.get('code_sha256') or '')[:12]}"
+                )
+                notebook_path, exec_cwd = self._prepare_bundle(run, workdir, writer)
+                if run.get("dataset_archive_path"):
+                    dataset_dir = workdir / "dataset"
+                    dataset_dir.mkdir(parents=True, exist_ok=True)
+                    count = extract_zip_safe(
+                        Path(run["dataset_archive_path"]),
+                        dataset_dir,
+                        self._settings.max_dataset_bytes,
+                    )
+                    writer.line(
+                        f"数据集已解压：{count} 个文件；sha256 "
+                        f"{str(run.get('dataset_sha256') or '')[:12]} → dataset/"
+                    )
+                    if exec_cwd != workdir:
+                        link = exec_cwd / "dataset"
+                        if not link.exists():
+                            try:
+                                os.symlink(dataset_dir, link)
+                            except OSError:
+                                pass
+                else:
+                    writer.line("数据集：未提供")
+                if run.get("assets_archive_path"):
+                    assets_dir = workdir / "assets"
+                    assets_dir.mkdir(parents=True, exist_ok=True)
+                    count = extract_zip_safe(
+                        Path(run["assets_archive_path"]),
+                        assets_dir,
+                        self._settings.max_assets_bytes,
+                    )
+                    writer.line(
+                        f"资产包已解压：{count} 个文件；sha256 "
+                        f"{str(run.get('assets_sha256') or '')[:12]} → assets/"
+                    )
+            else:
+                notebook = self._db.get_notebook_any(run["notebook_id"])
+                if notebook is None:
+                    raise RuntimeError("Notebook 不存在（可能在排队期间被删除）")
+                source_path = Path(notebook["storage_path"])
+                if not source_path.is_file():
+                    raise RuntimeError("Notebook 源文件缺失，请重新上传")
+                notebook_path = workdir / "notebook.ipynb"
+                shutil.copy2(source_path, notebook_path)
+                exec_cwd = workdir
 
-            self._link_dataset(run.get("dataset_id"), workdir / "dataset", writer)
+                self._link_dataset(run.get("dataset_id"), workdir / "dataset", writer)
 
             kernel = self._resolve_kernel(run)
-            writer.line(f"内核：{kernel}")
-            env = self._build_env(run, workdir, output_dir, home_dir, tmp_dir)
+            writer.line(f"内核：{kernel or 'Jupyter 默认'}")
+            env = self._build_env(run, workdir, output_dir, home_dir, tmp_dir, metrics_path)
 
-            nb = nbformat.read(str(workdir / "notebook.ipynb"), as_version=4)
+            nb = nbformat.read(str(notebook_path), as_version=4)
             self._apply_kernel(nb, kernel)
 
+            kernel_spec: dict[str, Any] = {}
+            try:
+                metadata = nb.get("metadata") or {}
+                raw_spec = metadata.get("kernelspec") or {}
+                if isinstance(raw_spec, dict):
+                    kernel_spec = raw_spec
+            except (AttributeError, TypeError):
+                kernel_spec = {}
+            try:
+                snapshot = await asyncio.to_thread(
+                    environment_snapshot,
+                    requested_kernel=kernel,
+                    kernel_spec=kernel_spec,
+                )
+                temp_environment = environment_path.with_name(
+                    f"{environment_path.name}.{os.getpid()}.tmp"
+                )
+                temp_environment.write_text(
+                    json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                os.replace(temp_environment, environment_path)
+            except Exception:
+                logger.warning("写入执行环境快照失败", exc_info=True)
+
             client_class = _streaming_client_class()
-            client = client_class(
-                nb,
-                timeout=self._settings.cell_timeout_seconds or None,
-                kernel_name=kernel,
-                log_writer=writer,
-            )
+            client_kwargs: dict[str, Any] = {
+                "timeout": self._settings.cell_timeout_seconds or None,
+                "log_writer": writer,
+            }
+            # 未显式指定内核时不传 kernel_name，让 nbclient 使用 notebook
+            # metadata 或 Jupyter 的默认内核（节点环境自行准备）。
+            if kernel:
+                client_kwargs["kernel_name"] = kernel
+            client = client_class(nb, **client_kwargs)
             self._active_clients[run_id] = client
 
             timeout_seconds = int(run.get("timeout_seconds") or 0)
-            execution = client.async_execute(cwd=str(workdir), env=env)
+            execution = client.async_execute(cwd=str(exec_cwd), env=env)
             exec_task = asyncio.create_task(execution, name=f"trainhub-exec-{run_id}")
             writer.line("开始执行 notebook")
             try:
@@ -443,6 +522,10 @@ class RunExecutor:
                 shutil.rmtree(workdir, ignore_errors=True)
                 shutil.rmtree(home_dir, ignore_errors=True)
                 shutil.rmtree(tmp_dir, ignore_errors=True)
+                if run.get("code_archive_path"):
+                    # 平台推送的输入包只是本次执行的搬运件：代码/数据版本在控制面，
+                    # 执行完即可回收（产物与日志仍保留）。
+                    self._storage.remove_tree(self._storage.execution_dir(run_id))
             self._active_clients.pop(run_id, None)
             self._cancel_requested.discard(run_id)
             elapsed = time.monotonic() - started
@@ -454,6 +537,48 @@ class RunExecutor:
                 )
 
     # ------------------------------------------------------------------ helpers
+
+    def _prepare_bundle(
+        self, run: dict[str, Any], workdir: Path, writer: RunLogWriter
+    ) -> tuple[Path, Path]:
+        """解开平台推送的代码包，返回 (入口 notebook, 执行 cwd)。
+
+        代码包支持单个 .ipynb 或 zip（zip 内可带辅助模块）；TrainHub 只按本次运行
+        的输入执行，不保存/解释版本信息（版本由控制面作业记录）。
+        """
+        archive = Path(str(run.get("code_archive_path") or ""))
+        if not archive.is_file():
+            raise RuntimeError("代码包缺失，请重新提交")
+        code_root = workdir / "code"
+        code_root.mkdir(parents=True, exist_ok=True)
+        entry = (run.get("entry") or "").strip()
+        if archive.suffix.lower() == ".ipynb" and not zipfile.is_zipfile(archive):
+            target = code_root / "notebook.ipynb"
+            shutil.copy2(archive, target)
+            writer.line("代码包：单个 notebook")
+            return target, code_root
+        if not zipfile.is_zipfile(archive):
+            raise RuntimeError("代码包只支持 .ipynb 或 zip")
+        count = extract_zip_safe(archive, code_root, self._settings.max_code_bytes)
+        writer.line(f"代码包已解压：{count} 个文件 → code/")
+        root_resolved = code_root.resolve()
+        candidate: Path | None = None
+        if entry:
+            candidate = (root_resolved / entry).resolve()
+            try:
+                candidate.relative_to(root_resolved)
+            except ValueError as exc:
+                raise RuntimeError(f"入口 notebook 超出代码包目录: {entry}") from exc
+            if not candidate.is_file():
+                raise RuntimeError(f"入口 notebook 不存在: {entry}")
+        else:
+            top_level = sorted(root_resolved.glob("*.ipynb"))
+            nested = sorted(path for path in root_resolved.rglob("*.ipynb") if path.is_file())
+            candidate = (top_level or nested or [None])[0]  # type: ignore[assignment]
+        if candidate is None:
+            raise RuntimeError("代码包内没有 .ipynb 入口")
+        writer.line(f"入口 notebook：{candidate.relative_to(root_resolved)}")
+        return candidate, candidate.parent
 
     def _link_dataset(self, dataset_id: str | None, target: Path, writer: RunLogWriter) -> None:
         if not dataset_id:
@@ -477,23 +602,22 @@ class RunExecutor:
             linked += 1
         writer.line(f"数据集已挂载：{linked}/{len(files)} 个文件 → work/dataset")
 
-    def _resolve_kernel(self, run: dict[str, Any]) -> str:
-        kernels = list_kernels()
-        names = {item["name"] for item in kernels}
+    def _resolve_kernel(self, run: dict[str, Any]) -> str | None:
+        """任务显式指定时校验；未指定则返回 None，交给 Jupyter 决定。"""
+        requested = str(run.get("kernel") or "").strip()
+        if not requested:
+            return None
+        names = {item["name"] for item in list_kernels()}
         if not names:
-            raise RuntimeError(
-                "服务器没有可用的 Jupyter 内核，请在 GPU 节点执行 "
-                "`python -m ipykernel install --name <kernel>` 注册训练环境"
-            )
-        requested = (run.get("kernel") or self._settings.default_kernel or "").strip()
-        if requested and requested in names:
-            return requested
-        if self._settings.default_kernel in names:
-            return self._settings.default_kernel
-        return sorted(names)[0]
+            raise RuntimeError("服务器没有可用的 Jupyter 内核，请在节点上准备 Jupyter 环境")
+        if requested not in names:
+            raise RuntimeError(f"内核不可用：{requested}；可用内核：{', '.join(sorted(names))}")
+        return requested
 
     @staticmethod
-    def _apply_kernel(nb: Any, kernel: str) -> None:
+    def _apply_kernel(nb: Any, kernel: str | None) -> None:
+        if not kernel:
+            return
         metadata = nb.setdefault("metadata", {})
         spec = metadata.setdefault("kernelspec", {})
         spec["name"] = kernel
@@ -501,7 +625,13 @@ class RunExecutor:
         spec["language"] = spec.get("language") or "python"
 
     def _build_env(
-        self, run: dict[str, Any], workdir: Path, output_dir: Path, home_dir: Path, tmp_dir: Path
+        self,
+        run: dict[str, Any],
+        workdir: Path,
+        output_dir: Path,
+        home_dir: Path,
+        tmp_dir: Path,
+        metrics_path: Path,
     ) -> dict[str, str]:
         env = os.environ.copy()
         parameters = run.get("parameters") or "{}"
@@ -516,6 +646,7 @@ class RunExecutor:
                 "DATASET_DIR": str(workdir / "dataset"),
                 "WMG_OUTPUT_DIR": str(output_dir),
                 "OUTPUT_DIR": str(output_dir),
+                "WMG_METRICS_FILE": str(metrics_path),
                 "WMG_WORK_DIR": str(workdir),
                 "WMG_PARAMS": parameters,
                 "HOME": str(home_dir),
@@ -529,6 +660,24 @@ class RunExecutor:
                 "PYTHONUNBUFFERED": "1",
             }
         )
+        if run.get("code_archive_path"):
+            env.update(
+                {
+                    "WMG_EXECUTION_ORIGIN": "platform",
+                    "WMG_CONTROL_JOB_ID": str(run.get("control_job_id") or ""),
+                    "WMG_CODE_SHA256": str(run.get("code_sha256") or ""),
+                    "WMG_DATASET_SHA256": str(run.get("dataset_sha256") or ""),
+                    "WMG_ASSETS_SHA256": str(run.get("assets_sha256") or ""),
+                    "WMG_BASE_MODEL": str(run.get("base_model") or ""),
+                }
+            )
+            assets_dir = workdir / "assets"
+            if assets_dir.is_dir():
+                env["WMG_ASSETS_DIR"] = str(assets_dir)
+                if (assets_dir / "model").is_dir():
+                    env["WMG_MODEL_DIR"] = str(assets_dir / "model")
+                if (assets_dir / "baseline").is_dir():
+                    env["WMG_BASELINE_MODEL_DIR"] = str(assets_dir / "baseline")
         return env
 
     async def _shutdown_client(self, client: Any) -> None:

@@ -1,0 +1,17 @@
+# 训练内核依赖（trainhub.run bundle 在节点的 Jupyter kernel 中执行）
+# 由控制面「部署下发」安装到 /opt/trainhub/trainer-venv，并注册 wmg-trainer 内核。
+# 说明：Linux 上默认 PyPI 的 torch wheel 自带 CUDA 运行时；如需指定 CUDA 版本，
+# 可在节点上配置 pip 源（~/.config/pip/pip.conf）或改用带 CUDA 的镜像源。
+
+torch>=2.1,<3
+transformers>=4.40
+datasets>=2.19
+accelerate>=0.30
+peft>=0.10
+safetensors>=0.4
+sentencepiece>=0.2
+huggingface_hub>=0.23
+scikit-learn>=1.3
+pandas>=2.0
+numpy>=1.24
+ipykernel>=6.25

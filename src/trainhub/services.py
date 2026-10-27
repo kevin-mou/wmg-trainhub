@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -13,7 +14,8 @@ from fastapi import UploadFile
 
 from .config import Settings
 from .db import TERMINAL_RUN_STATUSES, Database
-from .kernels import jupyter_available, list_kernels, resolve_default_kernel
+from .kernels import jupyter_available, list_kernels
+from .metrics import DEFAULT_MAX_POINTS, read_metrics_file
 from .responses import ApiError
 from .runner import scan_outputs
 from .storage import (
@@ -303,6 +305,18 @@ def notebook_download(
 # ---------------------------------------------------------------------- runs
 
 
+def ensure_executor_idle(db: Database, settings: Settings) -> None:
+    """单任务实例：已有排队/运行中的任务时拒绝新提交（409）。"""
+    active = db.count_active_runs()
+    limit = max(1, int(settings.max_concurrent_runs or 1))
+    if active >= limit:
+        raise ApiError(
+            f"TrainHub 当前已有 {active} 个任务在运行/排队（单任务实例，上限 {limit}），"
+            "请等待任务结束后再提交",
+            409,
+        )
+
+
 def create_run(
     *,
     db: Database,
@@ -318,6 +332,7 @@ def create_run(
 ) -> dict[str, Any]:
     if not jupyter_available():
         raise ApiError("服务器尚未安装 Jupyter 执行环境，无法提交训练", 503)
+    ensure_executor_idle(db, settings)
 
     notebook = db.get_notebook(customer["id"], notebook_id)
     if notebook is None:
@@ -331,10 +346,10 @@ def create_run(
     available = {item["name"] for item in list_kernels()}
     if not available:
         raise ApiError("服务器没有可用的 Jupyter 内核，请联系管理员", 503)
-    chosen_kernel = (kernel or "").strip() or resolve_default_kernel(settings)
-    if chosen_kernel not in available:
+    chosen_kernel = (kernel or "").strip() or None
+    if chosen_kernel is not None and chosen_kernel not in available:
         raise ApiError(
-            f"内核不可用：{chosen_kernel or '(空)'}；可用内核：{', '.join(sorted(available))}",
+            f"内核不可用：{chosen_kernel}；可用内核：{', '.join(sorted(available))}",
             400,
         )
 
@@ -358,6 +373,139 @@ def create_run(
         target_id=run["id"],
         detail=run["name"],
         ip=ip,
+    )
+    return run
+
+
+async def create_execution(
+    *,
+    db: Database,
+    storage: Storage,
+    settings: Settings,
+    name: str | None,
+    code: UploadFile,
+    dataset: UploadFile | None,
+    assets: UploadFile | None,
+    entry: str | None,
+    kernel: str | None,
+    parameters: dict[str, Any] | None,
+    timeout_seconds: int | None,
+    base_model: str | None,
+    control_job_id: str | None,
+) -> dict[str, Any]:
+    """平台控制面推送的闭环执行：只落输入并排队，不解释代码版本。"""
+    if not jupyter_available():
+        raise ApiError("服务器尚未安装 Jupyter 执行环境，无法提交训练", 503)
+    ensure_executor_idle(db, settings)
+    available = {item["name"] for item in list_kernels()}
+    if not available:
+        raise ApiError("服务器没有可用的 Jupyter 内核，请联系管理员", 503)
+    chosen_kernel = (kernel or "").strip() or None
+    if chosen_kernel is not None and chosen_kernel not in available:
+        raise ApiError(
+            f"内核不可用：{chosen_kernel}；可用内核：{', '.join(sorted(available))}", 400
+        )
+
+    run_id = "tr_" + secrets.token_hex(6)
+    code_name = safe_filename(code.filename or "code.zip")
+    code_path = storage.execution_code_path(run_id, code_name)
+    code_path.parent.mkdir(parents=True, exist_ok=True)
+    code_sha = hashlib.sha256()
+    code_bytes = 0
+    try:
+        with code_path.open("wb") as handle:
+            while True:
+                chunk = await code.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                code_bytes += len(chunk)
+                if code_bytes > settings.max_code_bytes:
+                    raise ApiError(f"代码包超过上限（{settings.max_code_mb} MB）", 413)
+                code_sha.update(chunk)
+                handle.write(chunk)
+        if code_bytes == 0:
+            raise ApiError("代码包为空", 400)
+
+        dataset_path: Path | None = None
+        dataset_sha: str | None = None
+        if dataset is not None and dataset.filename:
+            dataset_path = storage.execution_dataset_path(run_id)
+            dataset_sha_hash = hashlib.sha256()
+            dataset_bytes = 0
+            with dataset_path.open("wb") as handle:
+                while True:
+                    chunk = await dataset.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    dataset_bytes += len(chunk)
+                    if dataset_bytes > settings.max_dataset_bytes:
+                        raise ApiError(f"数据集超过上限（{settings.max_dataset_mb} MB）", 413)
+                    dataset_sha_hash.update(chunk)
+                    handle.write(chunk)
+            if dataset_bytes == 0:
+                dataset_path.unlink(missing_ok=True)
+                dataset_path = None
+            else:
+                dataset_sha = dataset_sha_hash.hexdigest()
+
+        assets_path: Path | None = None
+        assets_sha: str | None = None
+        if assets is not None and assets.filename:
+            assets_path = storage.execution_assets_path(run_id)
+            assets_sha_hash = hashlib.sha256()
+            assets_bytes = 0
+            with assets_path.open("wb") as handle:
+                while True:
+                    chunk = await assets.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    assets_bytes += len(chunk)
+                    if assets_bytes > settings.max_assets_bytes:
+                        raise ApiError(f"资产包超过上限（{settings.max_assets_mb} MB）", 413)
+                    assets_sha_hash.update(chunk)
+                    handle.write(chunk)
+            if assets_bytes == 0:
+                assets_path.unlink(missing_ok=True)
+                assets_path = None
+            else:
+                assets_sha = assets_sha_hash.hexdigest()
+
+        parameters_json = json.dumps(parameters, ensure_ascii=False) if parameters else None
+        timeout = settings.default_timeout_seconds if timeout_seconds is None else timeout_seconds
+        display_name = truncate((name or "").strip() or f"平台执行 · {run_id}", 120) or run_id
+        run = db.create_execution_run(
+            run_id=run_id,
+            name=display_name,
+            kernel=chosen_kernel,
+            parameters_json=parameters_json,
+            timeout_seconds=int(timeout or 0),
+            control_job_id=control_job_id,
+            code_archive_path=str(code_path),
+            code_sha256=code_sha.hexdigest(),
+            entry=(entry or "").strip() or None,
+            dataset_archive_path=str(dataset_path) if dataset_path else None,
+            dataset_sha256=dataset_sha,
+            assets_archive_path=str(assets_path) if assets_path else None,
+            assets_sha256=assets_sha,
+            base_model=(base_model or "").strip() or None,
+        )
+    except BaseException:
+        storage.remove_tree(storage.execution_dir(run_id))
+        raise
+    finally:
+        await code.close()
+        if dataset is not None:
+            await dataset.close()
+        if assets is not None:
+            await assets.close()
+
+    db.add_activity(
+        Database.SYSTEM_CUSTOMER_ID,
+        "execution.create",
+        target_type="run",
+        target_id=run_id,
+        detail=display_name,
+        ip=None,
     )
     return run
 
@@ -458,6 +606,37 @@ def _utf8_safe_cut(raw: bytes) -> int:
     return len(raw)
 
 
+def run_metrics(
+    *,
+    storage: Storage,
+    customer: dict[str, Any],
+    run: dict[str, Any],
+    max_points: int = DEFAULT_MAX_POINTS,
+) -> dict[str, Any]:
+    """读取可选的训练指标；指标缺失/损坏不阻断运行详情。"""
+    path = storage.run_metrics_path(customer["id"], run["id"])
+    return read_metrics_file(path, max_points=max_points)
+
+
+MAX_ENVIRONMENT_BYTES = 64 * 1024
+
+
+def run_environment(
+    *, storage: Storage, customer: dict[str, Any], run: dict[str, Any]
+) -> dict[str, Any] | None:
+    """读取执行器在训练启动时写入的环境快照（老运行没有该文件）。"""
+    path = storage.run_environment_path(customer["id"], run["id"])
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        if path.stat().st_size > MAX_ENVIRONMENT_BYTES:
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def run_log_file(
     *, storage: Storage, customer: dict[str, Any], run: dict[str, Any]
 ) -> tuple[Path, str]:
@@ -469,6 +648,55 @@ def run_log_file(
     if not log_path.is_file():
         raise ApiError("训练日志尚未生成", 404)
     return log_path, f"{_download_stem(run['name'])}.log"
+
+
+RESULT_MANIFEST_NAME = "trainhub_result.json"
+MAX_RESULT_MANIFEST_BYTES = 256 * 1024
+
+
+def run_result_manifest(
+    storage: Storage,
+    customer: dict[str, Any],
+    run: dict[str, Any],
+    *,
+    include_manifest: bool = True,
+) -> dict[str, Any]:
+    """读取产物目录里的 TrainHub 结果清单（平台成果桥契约）。
+
+    只读固定文件名 ``trainhub_result.json``（输出目录根）；大小/JSON/对象形状
+    任一不合法都返回 error，由调用方决定是否允许导入模型运营。
+    """
+    output_dir = (
+        Path(run["output_path"])
+        if run.get("output_path")
+        else storage.run_output_dir(customer["id"], run["id"])
+    )
+    path = output_dir / RESULT_MANIFEST_NAME
+    if path.is_symlink():
+        return {"present": True, "manifest": None, "error": "结果清单不能是符号链接"}
+    if not path.is_file():
+        return {"present": False, "manifest": None, "error": None}
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        return {"present": True, "manifest": None, "error": f"无法读取结果清单: {exc}"}
+    if size > MAX_RESULT_MANIFEST_BYTES:
+        return {
+            "present": True,
+            "manifest": None,
+            "error": f"结果清单超过 {MAX_RESULT_MANIFEST_BYTES // 1024}KB",
+        }
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"present": True, "manifest": None, "error": f"结果清单不是合法 JSON: {exc}"}
+    if not isinstance(data, dict):
+        return {"present": True, "manifest": None, "error": "结果清单必须是 JSON 对象"}
+    return {
+        "present": True,
+        "manifest": data if include_manifest else None,
+        "error": None,
+    }
 
 
 def run_outputs(storage: Storage, customer: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
@@ -547,4 +775,5 @@ __all__ = [
     "read_run_log_slice",
     "run_log_file",
     "run_outputs",
+    "run_result_manifest",
 ]

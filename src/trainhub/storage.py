@@ -78,6 +78,44 @@ def build_zip(source_dir: Path, dest: Path) -> int:
     return count
 
 
+def extract_zip_safe(archive: Path, dest: Path, max_bytes: int) -> int:
+    """解压 zip 到 dest：拒绝绝对路径/穿越/符号链接，并限制解压后总字节数。"""
+    dest.mkdir(parents=True, exist_ok=True)
+    dest_resolved = dest.resolve()
+    total = 0
+    count = 0
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            for info in zf.infolist():
+                name = info.filename.replace("\\", "/")
+                if not name or name.endswith("/"):
+                    continue
+                parts = [part for part in name.split("/") if part not in ("", ".")]
+                if not parts or any(part == ".." for part in parts):
+                    raise ApiError("代码包包含非法路径", 400)
+                # 外置属性高位是 Unix mode：0o120000 为符号链接，直接拒绝
+                mode = (info.external_attr >> 16) & 0o170000
+                if mode == 0o120000:
+                    raise ApiError("代码包不允许包含符号链接", 400)
+                target = (dest_resolved / Path(*parts)).resolve()
+                if os.path.commonpath([str(dest_resolved), str(target)]) != str(dest_resolved):
+                    raise ApiError("代码包包含非法路径", 400)
+                total += int(info.file_size or 0)
+                if total > max_bytes:
+                    raise ApiError(f"代码包解压后超过上限（{max_bytes // (1 << 20)} MB）", 413)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as src, target.open("wb") as out:
+                    while True:
+                        chunk = src.read(1 << 20)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                count += 1
+    except zipfile.BadZipFile as exc:
+        raise ApiError("代码包不是合法的 zip", 400) from exc
+    return count
+
+
 def iter_files(root: Path, limit: int = 2000) -> tuple[list[tuple[str, int]], bool]:
     """列出目录下所有普通文件（相对路径 + 字节数），返回 (列表, 是否被截断)。
 
@@ -107,11 +145,15 @@ class Storage:
         self.root = Path(data_dir).expanduser().resolve()
         self.customers_dir = self.root / "customers"
         self.jupyter_dir = self.root / "jupyter"
+        # 平台控制面推送的执行输入（代码包/数据集包）。与 run 工作目录分开，
+        # 因为执行器开跑前会清空 run 目录；这些输入要保留到任务结束。
+        self.executions_dir = self.root / "executions"
 
     def ensure_base_dirs(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.customers_dir.mkdir(parents=True, exist_ok=True)
         self.jupyter_dir.mkdir(parents=True, exist_ok=True)
+        self.executions_dir.mkdir(parents=True, exist_ok=True)
 
     # -- customers / resources
 
@@ -133,6 +175,20 @@ class Storage:
     def notebook_path(self, customer_id: str, notebook_id: str, filename: str) -> Path:
         return self.notebook_dir(customer_id, notebook_id) / filename
 
+    # -- platform executions
+
+    def execution_dir(self, run_id: str) -> Path:
+        return self.executions_dir / run_id
+
+    def execution_code_path(self, run_id: str, filename: str) -> Path:
+        return self.execution_dir(run_id) / "code" / filename
+
+    def execution_dataset_path(self, run_id: str) -> Path:
+        return self.execution_dir(run_id) / "dataset.zip"
+
+    def execution_assets_path(self, run_id: str) -> Path:
+        return self.execution_dir(run_id) / "assets.zip"
+
     # -- runs
 
     def run_dir(self, customer_id: str, run_id: str) -> Path:
@@ -146,6 +202,14 @@ class Storage:
 
     def run_log_path(self, customer_id: str, run_id: str) -> Path:
         return self.run_dir(customer_id, run_id) / "logs" / "run.log"
+
+    def run_metrics_path(self, customer_id: str, run_id: str) -> Path:
+        """Notebook 可选写入的结构化训练指标（JSONL）。"""
+        return self.run_dir(customer_id, run_id) / "logs" / "metrics.jsonl"
+
+    def run_environment_path(self, customer_id: str, run_id: str) -> Path:
+        """执行器在训练启动时写入的环境快照。"""
+        return self.run_dir(customer_id, run_id) / "environment.json"
 
     def run_home_dir(self, customer_id: str, run_id: str) -> Path:
         return self.run_dir(customer_id, run_id) / "home"

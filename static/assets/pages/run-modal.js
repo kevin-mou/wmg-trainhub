@@ -117,6 +117,7 @@ export async function openRunModal({ navigate, preselectedNotebookId = null }) {
         <textarea class="textarea" id="run-params" spellcheck="false"
           placeholder='{"epochs": 3, "learningRate": 0.001}'></textarea>
         <span class="hint">${escapeHtml(t("runModal.parametersHint"))}</span>
+        <span class="hint" id="run-params-prefill"></span>
       </div>`,
     footerHtml: `
       <button type="button" class="btn btn-secondary" data-act="cancel">${escapeHtml(
@@ -128,6 +129,53 @@ export async function openRunModal({ navigate, preselectedNotebookId = null }) {
     onMount: ({ dialog, close, showError }) => {
       const submit = dialog.querySelector('[data-submit="true"]');
       dialog.querySelector('[data-act="cancel"]').addEventListener("click", close);
+
+      const notebookSelect = dialog.querySelector("#run-notebook");
+      const paramsInput = dialog.querySelector("#run-params");
+      const paramsHint = dialog.querySelector("#run-params-prefill");
+      const drafts = new Map();
+      let activeNotebook = notebookSelect.value;
+      let prefillSeq = 0;
+
+      const prefillFromLastRun = async (notebookId) => {
+        const seq = ++prefillSeq;
+        let last = null;
+        try {
+          last = await http.get(`/api/notebooks/${encodeURIComponent(notebookId)}/last-run`);
+        } catch {
+          last = null;
+        }
+        if (seq !== prefillSeq || activeNotebook !== notebookId) return;
+        if (paramsInput.value.trim()) return;
+        const parameters = last && last.parameters;
+        if (
+          !parameters ||
+          typeof parameters !== "object" ||
+          Array.isArray(parameters) ||
+          !Object.keys(parameters).length
+        ) {
+          paramsHint.textContent = "";
+          return;
+        }
+        paramsInput.value = JSON.stringify(parameters, null, 2);
+        paramsHint.textContent = t("runModal.parametersFromLastRun", {
+          name: last.name || "—",
+        });
+      };
+
+      notebookSelect.addEventListener("change", () => {
+        drafts.set(activeNotebook, paramsInput.value);
+        activeNotebook = notebookSelect.value;
+        paramsInput.value = drafts.get(activeNotebook) || "";
+        paramsHint.textContent = "";
+        prefillSeq += 1;
+        if (!paramsInput.value.trim()) prefillFromLastRun(activeNotebook);
+      });
+      paramsInput.addEventListener("input", () => {
+        drafts.set(activeNotebook, paramsInput.value);
+        paramsHint.textContent = "";
+      });
+      prefillFromLastRun(activeNotebook);
 
       const submitRun = async () => {
         showError("");

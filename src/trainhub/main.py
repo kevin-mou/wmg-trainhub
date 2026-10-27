@@ -13,7 +13,6 @@ from . import __version__
 from .api import activity, admin, auth, datasets, health, notebooks, overview, runs
 from .config import PROJECT_ROOT, Settings
 from .db import Database
-from .kernels import ensure_default_kernel
 from .responses import (
     ApiError,
     api_error_handler,
@@ -42,7 +41,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        ensure_default_kernel(settings)
         await executor.start()
         try:
             yield

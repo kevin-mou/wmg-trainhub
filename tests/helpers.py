@@ -21,9 +21,10 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
         cell_timeout_seconds=0,
         max_dataset_mb=5,
         max_notebook_mb=2,
+        max_code_mb=5,
+        max_assets_mb=5,
         max_log_mb=5,
         keep_run_workdir=False,
-        default_kernel="python3",
         log_level="warning",
     )
     base.update(overrides)

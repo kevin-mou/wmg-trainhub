@@ -1,5 +1,6 @@
 import { download, http } from "../api.js";
 import { t } from "../i18n.js";
+import { renderMetricsChart } from "../metrics-chart.js";
 import {
   confirmDialog,
   escapeHtml,
@@ -19,6 +20,7 @@ export async function renderRunDetail(root, ctx) {
   let run = null;
   let logOffset = 0;
   let logComplete = false;
+  let metricsKey = "";
   let follow = true;
   let pollTimer = null;
   let ticks = 0;
@@ -35,6 +37,13 @@ export async function renderRunDetail(root, ctx) {
       <div class="run-head-meta" id="run-status"></div>
       <div class="run-head-actions" id="run-actions"></div>
     </div>
+    <section class="panel metrics-panel" id="metrics-panel" hidden>
+      <div class="metrics-panel-head">
+        <div class="meta-title">${escapeHtml(t("runDetail.metrics"))}</div>
+        <div class="metrics-meta" id="metrics-meta"></div>
+      </div>
+      <div class="metrics-chart" id="metrics-chart"></div>
+    </section>
     <div class="run-layout">
       <section class="log-panel">
         <div class="log-bar">
@@ -64,6 +73,12 @@ export async function renderRunDetail(root, ctx) {
             <div class="meta-title">${escapeHtml(t("runDetail.info"))}</div>
             <dl class="kv" id="meta-info"></dl>
             <div id="meta-message"></div>
+          </div>
+        </div>
+        <div class="panel" id="environment-panel" hidden>
+          <div class="meta-section">
+            <div class="meta-title">${escapeHtml(t("runDetail.environment"))}</div>
+            <dl class="kv" id="meta-environment"></dl>
           </div>
         </div>
         <div class="panel">
@@ -96,6 +111,11 @@ export async function renderRunDetail(root, ctx) {
     followWrap: root.querySelector("#follow-toggle"),
     jump: root.querySelector("#log-jump"),
     logDownload: root.querySelector("#log-download"),
+    metricsPanel: root.querySelector("#metrics-panel"),
+    metricsMeta: root.querySelector("#metrics-meta"),
+    metricsChart: root.querySelector("#metrics-chart"),
+    environmentPanel: root.querySelector("#environment-panel"),
+    environment: root.querySelector("#meta-environment"),
     info: root.querySelector("#meta-info"),
     message: root.querySelector("#meta-message"),
     params: root.querySelector("#meta-params"),
@@ -233,6 +253,40 @@ export async function renderRunDetail(root, ctx) {
       refs.message.innerHTML = "";
     }
 
+    const environment = run.environment;
+    if (environment) {
+      const service = environment.service || {};
+      const kernel = environment.kernel || {};
+      const gpuNames = (Array.isArray(environment.gpu) ? environment.gpu : [])
+        .map((item) => (item && item.name ? String(item.name) : ""))
+        .filter(Boolean);
+      refs.environment.innerHTML = [
+        kvRow(
+          t("runDetail.pythonVersion"),
+          `<span class="mono">${escapeHtml(service.pythonVersion || "—")}</span>`
+        ),
+        kvRow(t("runDetail.platform"), escapeHtml(service.platform || "—")),
+        kvRow(
+          t("runDetail.effectiveKernel"),
+          `<span class="mono">${escapeHtml(
+            kernel.effective || kernel.displayName || "—"
+          )}</span>`
+        ),
+        kvRow(
+          t("runDetail.gpu"),
+          escapeHtml(gpuNames.length ? gpuNames.join(", ") : t("common.unavailable"))
+        ),
+        kvRow(
+          t("runDetail.trainhubVersion"),
+          `<span class="mono">${escapeHtml(environment.trainhubVersion || "—")}</span>`
+        ),
+      ].join("");
+      refs.environmentPanel.hidden = false;
+    } else {
+      refs.environment.innerHTML = "";
+      refs.environmentPanel.hidden = true;
+    }
+
     const params = run.parameters || {};
     const entries = Object.entries(params);
     refs.params.innerHTML = entries.length
@@ -307,6 +361,32 @@ export async function renderRunDetail(root, ctx) {
     logComplete = data.completed && data.nextOffset >= data.totalBytes;
   }
 
+  async function pullMetrics() {
+    const data = await http.get(`/api/runs/${runId}/metrics`);
+    if (disposed) return;
+    const series = data && Array.isArray(data.series) ? data.series : [];
+    if (!series.length) {
+      refs.metricsPanel.hidden = true;
+      refs.metricsChart.innerHTML = "";
+      metricsKey = "";
+      return;
+    }
+    const key = `${data.updatedAt || ""}|${data.pointCount || 0}|${series
+      .map((item) => (item && item.name ? item.name : ""))
+      .join("\u0000")}`;
+    if (key === metricsKey) return;
+    metricsKey = key;
+    refs.metricsPanel.hidden = false;
+    const shownPoints = series.reduce(
+      (sum, item) => sum + (Array.isArray(item.points) ? item.points.length : 0),
+      0
+    );
+    refs.metricsMeta.textContent = data.truncated
+      ? t("runDetail.metricsTruncated", { points: shownPoints })
+      : t("runDetail.metricsPoints", { points: data.pointCount || shownPoints });
+    renderMetricsChart(refs.metricsChart, series, { label: t("runDetail.metrics") });
+  }
+
   refs.logDownload.addEventListener("click", async () => {
     try {
       await download(`/api/runs/${runId}/logs/download`, `${run ? run.name : runId}.log`);
@@ -335,6 +415,7 @@ export async function renderRunDetail(root, ctx) {
     try {
       if (ticks % 3 === 0) await loadRun();
       await pullLogs();
+      if (ticks % 2 === 0) await pullMetrics().catch(() => {});
       failures = 0;
     } catch (error) {
       failures += 1;
@@ -348,12 +429,14 @@ export async function renderRunDetail(root, ctx) {
       clearInterval(pollTimer);
       await loadRun().catch(() => {});
       await pullLogs().catch(() => {});
+      await pullMetrics().catch(() => {});
     }
   }
 
   try {
     await loadRun();
     await pullLogs();
+    await pullMetrics().catch(() => {});
   } catch (error) {
     root.innerHTML = `<div class="panel"><div class="empty">
       <div class="empty-title">${escapeHtml(

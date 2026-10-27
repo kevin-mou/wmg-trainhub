@@ -7,6 +7,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
 from ..db import Database
+from ..metrics import DEFAULT_MAX_POINTS
 from ..responses import ApiError, ok, page_data
 from ..runner import RunExecutor
 from ..schemas import RunCreate
@@ -18,7 +19,9 @@ from ..services import (
     output_file,
     output_zip,
     read_run_log_slice,
+    run_environment,
     run_log_file,
+    run_metrics,
     run_outputs,
 )
 from ..storage import Storage
@@ -101,6 +104,7 @@ def get_run(
     )
     payload["logBytes"] = log_path.stat().st_size if log_path.is_file() else 0
     payload["outputs"] = run_outputs(storage, customer, run)
+    payload["environment"] = run_environment(storage=storage, customer=customer, run=run)
     return ok(payload)
 
 
@@ -152,6 +156,18 @@ def get_run_logs(
             tail=tail,
         )
     )
+
+
+@router.get("/{run_id}/metrics")
+def get_run_metrics(
+    run_id: str,
+    maxPoints: int = Query(DEFAULT_MAX_POINTS, ge=100, le=5000),
+    customer: dict = Depends(current_customer),
+    db: Database = Depends(get_db),
+    storage: Storage = Depends(get_storage),
+) -> dict:
+    run = get_run_or_404(db, customer, run_id)
+    return ok(run_metrics(storage=storage, customer=customer, run=run, max_points=maxPoints))
 
 
 @router.get("/{run_id}/logs/download")

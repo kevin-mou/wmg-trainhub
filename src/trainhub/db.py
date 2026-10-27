@@ -76,9 +76,20 @@ CREATE TABLE IF NOT EXISTS runs (
     output_path TEXT,
     created_at TEXT NOT NULL,
     started_at TEXT,
-    finished_at TEXT
+    finished_at TEXT,
+    origin TEXT NOT NULL DEFAULT 'customer',
+    control_job_id TEXT,
+    code_archive_path TEXT,
+    code_sha256 TEXT,
+    entry TEXT,
+    dataset_archive_path TEXT,
+    dataset_sha256 TEXT,
+    assets_archive_path TEXT,
+    assets_sha256 TEXT,
+    base_model TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_customer ON runs(customer_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_notebook ON runs(customer_id, notebook_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 
 CREATE TABLE IF NOT EXISTS activity_logs (
@@ -103,6 +114,10 @@ class Database:
     单实例部署：一个连接 + 进程内锁，足以满足并发写入（WAL 模式）。
     """
 
+    # 平台控制面推送的执行任务统一挂在这个保留客户下：不参与客户列表与令牌登录，
+    # 仅用于满足 runs.customer_id 的外键约束（TrainHub 不管理控制面的版本语义）。
+    SYSTEM_CUSTOMER_ID = "sys_platform"
+
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,10 +130,21 @@ class Database:
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         self._migrate_schema()
+        self.ensure_system_customer()
 
     def _migrate_schema(self) -> None:
         """存量库补列（新库由 _SCHEMA 直接建出）；重复执行安全。"""
         for table, name, sql_type in (
+            ("runs", "origin", "TEXT NOT NULL DEFAULT 'customer'"),
+            ("runs", "control_job_id", "TEXT"),
+            ("runs", "code_archive_path", "TEXT"),
+            ("runs", "code_sha256", "TEXT"),
+            ("runs", "entry", "TEXT"),
+            ("runs", "dataset_archive_path", "TEXT"),
+            ("runs", "dataset_sha256", "TEXT"),
+            ("runs", "assets_archive_path", "TEXT"),
+            ("runs", "assets_sha256", "TEXT"),
+            ("runs", "base_model", "TEXT"),
             ("runs", "dataset_owner_id", "TEXT"),
             ("runs", "dataset_owner_name", "TEXT"),
             ("datasets", "visibility", "TEXT NOT NULL DEFAULT 'private'"),
@@ -127,6 +153,18 @@ class Database:
                 self._execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
             except sqlite3.OperationalError:
                 continue
+
+    def ensure_system_customer(self) -> None:
+        existing = self._query_one(
+            "SELECT id FROM customers WHERE id = ?", (self.SYSTEM_CUSTOMER_ID,)
+        )
+        if existing:
+            return
+        self._execute(
+            "INSERT INTO customers (id, name, email, token, status, created_at) "
+            "VALUES (?, ?, NULL, ?, 'active', ?)",
+            (self.SYSTEM_CUSTOMER_ID, "平台执行任务", "sys_" + secrets.token_hex(16), utc_now()),
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -175,12 +213,13 @@ class Database:
     def list_customers(
         self, page: int, size: int, q: str | None = None
     ) -> tuple[list[dict[str, Any]], int]:
-        where = ""
-        params: list[Any] = []
+        clauses = ["c.id <> ?"]
+        params: list[Any] = [self.SYSTEM_CUSTOMER_ID]
         if q:
+            clauses.append("(c.name LIKE ? OR c.id LIKE ? OR COALESCE(c.email, '') LIKE ?)")
             like = f"%{q.strip()}%"
-            where = "WHERE c.name LIKE ? OR c.id LIKE ? OR COALESCE(c.email, '') LIKE ?"
-            params = [like, like, like]
+            params.extend([like, like, like])
+        where = f"WHERE {' AND '.join(clauses)}"
         total_row = self._query_one(f"SELECT COUNT(*) AS n FROM customers c {where}", params)
         total = int(total_row["n"]) if total_row else 0
         rows = self._query(
@@ -455,6 +494,72 @@ class Database:
         )
         return self.get_run_any(run_id)  # type: ignore[return-value]
 
+    def create_execution_run(
+        self,
+        *,
+        run_id: str,
+        name: str,
+        kernel: str | None,
+        parameters_json: str | None,
+        timeout_seconds: int,
+        control_job_id: str | None,
+        code_archive_path: str,
+        code_sha256: str,
+        entry: str | None,
+        dataset_archive_path: str | None,
+        dataset_sha256: str | None,
+        assets_archive_path: str | None,
+        assets_sha256: str | None,
+        base_model: str | None,
+    ) -> dict[str, Any]:
+        """平台控制面推送的闭环执行（不涉及 notebook 版本语义）。"""
+        now = utc_now()
+        self._execute(
+            "INSERT INTO runs "
+            "(id, customer_id, notebook_id, notebook_name, dataset_id, dataset_name, name, "
+            " status, kernel, parameters, timeout_seconds, created_at, origin, control_job_id, "
+            " code_archive_path, code_sha256, entry, dataset_archive_path, dataset_sha256, "
+            " assets_archive_path, assets_sha256, base_model) "
+            "VALUES (?, ?, NULL, ?, NULL, NULL, ?, 'queued', ?, ?, ?, ?, 'platform', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                run_id,
+                self.SYSTEM_CUSTOMER_ID,
+                Path(code_archive_path).name,
+                name,
+                kernel,
+                parameters_json,
+                timeout_seconds,
+                now,
+                control_job_id or None,
+                code_archive_path,
+                code_sha256,
+                entry or None,
+                dataset_archive_path,
+                dataset_sha256,
+                assets_archive_path,
+                assets_sha256,
+                base_model or None,
+            ),
+        )
+        return self.get_run_any(run_id)  # type: ignore[return-value]
+
+    def global_run_status_counts(self) -> dict[str, int]:
+        rows = self._query(
+            "SELECT status, COUNT(*) AS n FROM runs WHERE status IN ('queued','running') "
+            "GROUP BY status"
+        )
+        counts = {"queued": 0, "running": 0}
+        for row in rows:
+            counts[str(row["status"])] = int(row["n"])
+        return counts
+
+    def list_active_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        return self._query(
+            "SELECT id, name, status, origin, control_job_id, started_at, created_at "
+            "FROM runs WHERE status IN ('queued','running') ORDER BY created_at LIMIT ?",
+            (int(limit),),
+        )
+
     def get_run(self, customer_id: str, run_id: str) -> dict[str, Any] | None:
         return self._query_one(
             "SELECT * FROM runs WHERE id = ? AND customer_id = ?", (run_id, customer_id)
@@ -462,6 +567,14 @@ class Database:
 
     def get_run_any(self, run_id: str) -> dict[str, Any] | None:
         return self._query_one("SELECT * FROM runs WHERE id = ?", (run_id,))
+
+    def latest_run_for_notebook(self, customer_id: str, notebook_id: str) -> dict[str, Any] | None:
+        """该 Notebook 最近一次客户运行：只用于提交表单回填，不进入平台策略。"""
+        return self._query_one(
+            "SELECT * FROM runs WHERE customer_id = ? AND notebook_id = ? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (customer_id, notebook_id),
+        )
 
     def list_runs(
         self,
@@ -486,6 +599,41 @@ class Database:
         rows = self._query(
             f"SELECT * FROM runs WHERE {clause} "
             "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            [*params, size, (page - 1) * size],
+        )
+        return rows, total
+
+    def list_runs_admin(
+        self,
+        page: int,
+        size: int,
+        status: str | None = None,
+        customer_id: str | None = None,
+        q: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """平台管理面：跨客户列出训练任务（带客户名）。"""
+        where: list[str] = []
+        params: list[Any] = []
+        if status:
+            where.append("r.status = ?")
+            params.append(status)
+        if customer_id:
+            where.append("r.customer_id = ?")
+            params.append(customer_id)
+        if q:
+            like = f"%{q.strip()}%"
+            where.append(
+                "(r.name LIKE ? OR COALESCE(r.notebook_name, '') LIKE ? "
+                "OR c.name LIKE ? OR c.id LIKE ?)"
+            )
+            params.extend([like, like, like, like])
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        base = "FROM runs r JOIN customers c ON c.id = r.customer_id"
+        total_row = self._query_one(f"SELECT COUNT(*) AS n {base} {clause}", params)
+        total = int(total_row["n"]) if total_row else 0
+        rows = self._query(
+            f"SELECT r.*, c.name AS customer_name, c.email AS customer_email {base} {clause} "
+            "ORDER BY r.created_at DESC, r.id DESC LIMIT ? OFFSET ?",
             [*params, size, (page - 1) * size],
         )
         return rows, total
@@ -642,8 +790,11 @@ class Database:
         active_runs = self._query_one(
             "SELECT COUNT(*) AS n FROM runs WHERE status IN ('queued', 'running')"
         )
+        customers = self._query_one(
+            "SELECT COUNT(*) AS n FROM customers WHERE id <> ?", (self.SYSTEM_CUSTOMER_ID,)
+        )
         return {
-            "customers": count("customers"),
+            "customers": int(customers["n"]) if customers else 0,
             "datasets": count("datasets"),
             "notebooks": count("notebooks"),
             "runs": count("runs"),

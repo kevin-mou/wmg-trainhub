@@ -14,6 +14,7 @@ async def test_static_assets_are_served(client):
         ("/assets/app.js", "const NAV_ITEMS"),
         ("/assets/styles.css", "--pine"),
         ("/assets/i18n.js", "dictionaries"),
+        ("/assets/metrics-chart.js", "renderMetricsChart"),
         ("/assets/fonts/instrument-sans-latin.woff2", None),
     ):
         response = await client.get(path)

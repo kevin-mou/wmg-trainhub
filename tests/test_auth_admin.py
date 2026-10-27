@@ -109,3 +109,67 @@ async def test_admin_api_disabled_without_token(tmp_path):
 async def test_business_endpoints_require_token(client, path):
     response = await client.get(path)
     assert response.status_code == 401
+
+
+async def test_admin_run_list_detail_and_outputs(client, db, customer, settings):
+    """平台成果桥：跨客户 run 列表、详情、结果清单与产物下载。"""
+    import io
+    import json
+    import zipfile
+
+    run = db.create_run(
+        customer_id=customer["id"],
+        notebook={"id": "nb-1", "name": "train.ipynb"},
+        dataset=None,
+        name="demo-run",
+        kernel="python3",
+        parameters_json=None,
+        timeout_seconds=0,
+    )
+    output_dir = settings.data_dir / "customers" / customer["id"] / "runs" / run["id"] / "output"
+    (output_dir / "adapter").mkdir(parents=True)
+    (output_dir / "adapter" / "weights.bin").write_bytes(b"weights")
+    (output_dir / "trainhub_result.json").write_text(
+        json.dumps(
+            {
+                "modelName": "trainhub-demo",
+                "baseModel": "Qwen3.5-0.8B",
+                "adapterPath": "adapter",
+                "metrics": {"joint": 0.8},
+            }
+        ),
+        encoding="utf-8",
+    )
+    db.finish_run(
+        run["id"],
+        status="succeeded",
+        exit_code=0,
+        message=None,
+        log_path=None,
+        output_path=str(output_dir),
+    )
+    admin_headers = {"X-Admin-Token": "admin-test-token"}
+
+    listing = await client.get("/api/admin/runs", headers=admin_headers)
+    assert listing.status_code == 200, listing.text
+    record = next(item for item in listing.json()["data"]["records"] if item["id"] == run["id"])
+    assert record["customer"]["id"] == customer["id"]
+    assert record["result"]["present"] is True
+    assert record["result"]["manifest"] is None  # 列表只回摘要，详情再给完整清单
+
+    detail = await client.get(f"/api/admin/runs/{run['id']}", headers=admin_headers)
+    assert detail.status_code == 200, detail.text
+    data = detail.json()["data"]
+    assert data["customer"]["name"] == "Test Co"
+    assert {item["path"] for item in data["outputs"]["files"]} >= {
+        "trainhub_result.json",
+        "adapter/weights.bin",
+    }
+
+    download = await client.get(
+        f"/api/admin/runs/{run['id']}/outputs/download", headers=admin_headers
+    )
+    assert download.status_code == 200, download.text
+    with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+        assert "trainhub_result.json" in archive.namelist()
+        assert "adapter/weights.bin" in archive.namelist()

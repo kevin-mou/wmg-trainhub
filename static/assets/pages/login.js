@@ -1,8 +1,38 @@
 import { getLang, t } from "../i18n.js";
 import { escapeHtml, icons, logoMark } from "../ui.js";
 
+const REMEMBER_COOKIE = "trainhub_remembered_token";
+const REMEMBER_MAX_AGE = 60 * 60 * 24 * 30;
+
+function readCookie(name) {
+  try {
+    const prefix = `${name}=`;
+    const cookies = String(document.cookie || "");
+    for (const part of cookies.split(";")) {
+      const item = part.trim();
+      if (item.startsWith(prefix)) {
+        return decodeURIComponent(item.slice(prefix.length));
+      }
+    }
+  } catch {
+    /* Cookie 不可用时按“未记住”处理 */
+  }
+  return "";
+}
+
+function writeCookie(name, value, maxAgeSeconds) {
+  try {
+    const secure =
+      typeof location !== "undefined" && location.protocol === "https:" ? "; Secure" : "";
+    document.cookie = `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAgeSeconds}; SameSite=Strict${secure}`;
+  } catch {
+    /* Cookie 不可用时静默降级，不影响登录 */
+  }
+}
+
 export function renderLogin(root, { onLogin, onToggleLang, onToggleTheme, theme }) {
   const switchLabel = getLang() === "zh" ? "EN" : "中";
+  const rememberedToken = readCookie(REMEMBER_COOKIE);
   root.innerHTML = `
     <div class="login-page">
       <section class="login-brand" aria-label="TrainHub">
@@ -57,12 +87,21 @@ export function renderLogin(root, { onLogin, onToggleLang, onToggleTheme, theme 
                 <label for="login-token">${escapeHtml(t("login.tokenLabel"))}</label>
                 <div class="token-field">
                   <input class="input" id="login-token" type="password" spellcheck="false"
-                    autocomplete="off" placeholder="${escapeHtml(t("login.tokenPlaceholder"))}" />
+                    autocomplete="off" value="${escapeHtml(rememberedToken)}"
+                    placeholder="${escapeHtml(t("login.tokenPlaceholder"))}" />
                   <button type="button" class="icon-btn" id="login-reveal" aria-label="${escapeHtml(
                     t("account.reveal")
                   )}">${icons.eye}</button>
                 </div>
                 <span class="hint">${escapeHtml(t("login.tokenHint"))}</span>
+                <label class="remember-row">
+                  <input type="checkbox" id="login-remember" checked
+                    aria-describedby="login-remember-hint" />
+                  <span>${escapeHtml(t("login.remember"))}</span>
+                </label>
+                <span class="hint" id="login-remember-hint">${escapeHtml(
+                  t("login.rememberHint")
+                )}</span>
               </div>
               <button type="submit" class="btn btn-primary login-submit" id="login-submit">
                 ${escapeHtml(t("login.submit"))}
@@ -79,6 +118,7 @@ export function renderLogin(root, { onLogin, onToggleLang, onToggleTheme, theme 
   const error = root.querySelector("#login-error");
   const submit = root.querySelector("#login-submit");
   const reveal = root.querySelector("#login-reveal");
+  const rememberInput = root.querySelector("#login-remember");
 
   const showError = (message) => {
     error.textContent = message || "";
@@ -106,8 +146,11 @@ export function renderLogin(root, { onLogin, onToggleLang, onToggleTheme, theme 
     showError("");
     submit.disabled = true;
     submit.textContent = t("login.submitting");
+    const remember = Boolean(rememberInput?.checked);
+    if (!remember) writeCookie(REMEMBER_COOKIE, "", 0);
     try {
       await onLogin(token);
+      if (remember) writeCookie(REMEMBER_COOKIE, token, REMEMBER_MAX_AGE);
     } catch (err) {
       showError(err && err.message ? err.message : t("common.error"));
       submit.disabled = false;

@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from ..config import Settings
 from ..db import Database
 from ..responses import ApiError, ok, page_data
-from ..serializers import notebook_public
+from ..serializers import notebook_public, run_public
 from ..services import create_notebook, delete_notebook, notebook_download
 from ..storage import Storage
 from .deps import client_ip, current_customer, get_db, get_settings, get_storage
@@ -61,6 +61,20 @@ def get_notebook(
     if notebook is None:
         raise ApiError("Notebook 不存在", 404)
     return ok(notebook_public(notebook))
+
+
+@router.get("/{notebook_id}/last-run")
+def get_notebook_last_run(
+    notebook_id: str,
+    customer: dict = Depends(current_customer),
+    db: Database = Depends(get_db),
+) -> dict:
+    """提交训练时回填该 Notebook 最近一次运行的参数（没有运行则返回 null）。"""
+    notebook = db.get_notebook(customer["id"], notebook_id)
+    if notebook is None:
+        raise ApiError("Notebook 不存在", 404)
+    run = db.latest_run_for_notebook(customer["id"], notebook_id)
+    return ok(run_public(run) if run else None)
 
 
 @router.get("/{notebook_id}/download")

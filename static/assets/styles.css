@@ -60,6 +60,14 @@
   --err-soft: #f8e5e3;
   --info: #356b8a;
   --info-soft: #e5eff4;
+  --chart-1: #2c7a54;
+  --chart-2: #966c1e;
+  --chart-3: #356b8a;
+  --chart-4: #ad3b38;
+  --chart-5: #6b5b95;
+  --chart-6: #2f7f7a;
+  --chart-7: #a35d2a;
+  --chart-8: #7a6a2a;
   --log-bg: #0f1512;
   --log-bar: #141b17;
   --log-ink: #d7e1d5;
@@ -102,6 +110,14 @@
   --err-soft: #331a18;
   --info: #7fb4cf;
   --info-soft: #16262f;
+  --chart-1: #64ba8d;
+  --chart-2: #d2a849;
+  --chart-3: #7fb4cf;
+  --chart-4: #e07973;
+  --chart-5: #a99bd1;
+  --chart-6: #6fc2ba;
+  --chart-7: #d99262;
+  --chart-8: #c2b36a;
   --log-bg: #090e0b;
   --log-bar: #111a15;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
@@ -1203,6 +1219,100 @@ button {
   align-items: start;
 }
 
+.metrics-panel {
+  margin-bottom: 14px;
+}
+
+.metrics-panel[hidden],
+#environment-panel[hidden] {
+  display: none;
+}
+
+.metrics-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 0;
+}
+
+.metrics-panel-head .meta-title {
+  margin-bottom: 0;
+}
+
+.metrics-meta {
+  color: var(--ink-3);
+  font-size: 11.5px;
+  text-align: right;
+}
+
+.metrics-chart {
+  padding: 8px 12px 12px;
+}
+
+.metrics-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 0 4px 10px;
+}
+
+.metrics-legend-item {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  color: var(--ink-2);
+  font-size: 11.5px;
+}
+
+.metrics-swatch {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.metrics-legend-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metrics-legend-value {
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.metrics-plot svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.metrics-grid-line {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.metrics-grid-line-v {
+  stroke-dasharray: 2 5;
+  opacity: 0.65;
+}
+
+.metrics-axis-text {
+  fill: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.metrics-point {
+  stroke: var(--surface);
+  stroke-width: 1.4;
+}
+
 .log-panel {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1908,6 +2018,7 @@ dialog::backdrop {
   top: 4px;
 }
 
+.remember-row,
 .check-row {
   display: inline-flex;
   align-items: center;
@@ -1919,6 +2030,7 @@ dialog::backdrop {
   user-select: none;
 }
 
+.remember-row input,
 .check-row input {
   width: 14px;
   height: 14px;
