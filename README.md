@@ -207,11 +207,16 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli set-status --id c_ab12cd34 --sta
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/datasets?page=&size=&q=` | 列表（分页/搜索） |
-| POST | `/api/datasets` | multipart：`files[]`、`name`、`description` |
-| GET | `/api/datasets/{id}` | 详情与文件列表 |
-| GET | `/api/datasets/{id}/download` | 单文件直出，多文件打包 ZIP |
-| DELETE | `/api/datasets/{id}` | 删除（有排队/执行中任务时返回 409） |
+| GET | `/api/datasets?page=&size=&q=` | 列表：自己的 + 其他客户共享的（含所有者信息） |
+| POST | `/api/datasets` | multipart：`files[]`、`name`、`description`、`shared`（可选） |
+| GET | `/api/datasets/{id}` | 详情与文件列表（自己的或共享的） |
+| GET | `/api/datasets/{id}/download` | 单文件直出，多文件打包 ZIP（共享数据集同样可下载） |
+| PATCH | `/api/datasets/{id}/sharing` | 切换共享：`{"shared": true\|false}`（仅所有者） |
+| DELETE | `/api/datasets/{id}` | 删除（仅所有者；任何人排队/执行中任务引用时返回 409） |
+
+数据集默认私有；所有者可以在上传时勾选「共享给其他用户」，也可以之后在列表里切换。共享后其他客户可以在列表中看到、下载，并在提交训练时只读挂载到 `dataset/`。共享是**可信企业场景下的协作可见性**，不是安全边界（见「安全边界」）。
+
+升级后重启 TrainHub 服务即可：SQLite 启动时会自动补 `datasets.visibility` 与 `runs.dataset_owner_*` 列，存量数据集默认私有，无需手工迁移。
 
 ### Notebooks
 
@@ -263,7 +268,7 @@ $TRAINHUB_DATA_DIR/
 ## 安全边界（部署前必读）
 
 - **Notebook 是任意代码**：训练内核与服务进程使用同一个操作系统用户。不同客户之间**没有操作系统级隔离**——知道路径的 Notebook 可以读取本实例内其他客户的文件。本工程面向「可信客户 + 专用 GPU 节点」；若要对不可信客户开放，请为每个客户部署独立实例/独立 Unix 用户，或把执行器替换为容器化方案（见 Roadmap）。
-- 数据集文件上传后设为只读（`0444`）并符号链接进工作目录，防止训练误写；这不是安全边界（同用户仍可 `chmod`）。
+- 数据集文件上传后设为只读（`0444`）并符号链接进工作目录，防止训练误写；这不是安全边界（同用户仍可 `chmod`）。数据集「共享/私有」同样只是应用层可见性，不能阻止 Notebook 直接按路径读取未共享的数据。
 - 令牌是长期凭据：只走 HTTPS；数据库与备份文件权限收紧；泄露后立即重置。
 - 上传上限：`TRAINHUB_MAX_DATASET_MB` / `TRAINHUB_MAX_NOTEBOOK_MB`；日志上限 `TRAINHUB_MAX_LOG_MB`。接口层未做请求频率限制，公网部署请在反向代理上限制速率与并发。
 - 下载路径做了穿越校验；ZIP 打包不跟随符号链接，避免产物把节点上的外部文件打包出去。

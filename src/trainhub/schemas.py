@@ -53,3 +53,9 @@ class CustomerStatusUpdate(BaseModel):
         if value not in ("active", "disabled"):
             raise ValueError("status 只能是 active 或 disabled")
         return value
+
+
+class DatasetSharingUpdate(BaseModel):
+    """数据集共享开关（仅所有者可改）。"""
+
+    shared: bool

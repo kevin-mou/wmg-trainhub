@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS datasets (
     status TEXT NOT NULL DEFAULT 'ready',
     size_bytes INTEGER NOT NULL DEFAULT 0,
     file_count INTEGER NOT NULL DEFAULT 0,
+    visibility TEXT NOT NULL DEFAULT 'private',
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_datasets_customer ON datasets(customer_id, created_at DESC);
@@ -62,6 +63,8 @@ CREATE TABLE IF NOT EXISTS runs (
     notebook_name TEXT,
     dataset_id TEXT,
     dataset_name TEXT,
+    dataset_owner_id TEXT,
+    dataset_owner_name TEXT,
     name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'queued',
     kernel TEXT,
@@ -111,6 +114,19 @@ class Database:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """存量库补列（新库由 _SCHEMA 直接建出）；重复执行安全。"""
+        for table, name, sql_type in (
+            ("runs", "dataset_owner_id", "TEXT"),
+            ("runs", "dataset_owner_name", "TEXT"),
+            ("datasets", "visibility", "TEXT NOT NULL DEFAULT 'private'"),
+        ):
+            try:
+                self._execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+            except sqlite3.OperationalError:
+                continue
 
     def close(self) -> None:
         with self._lock:
@@ -221,15 +237,26 @@ class Database:
         size_bytes: int,
         file_count: int,
         dataset_id: str | None = None,
+        visibility: str = "private",
     ) -> dict[str, Any]:
         dataset_id = dataset_id or ("ds_" + secrets.token_hex(6))
         now = utc_now()
         with self._lock:
             self._conn.execute(
                 "INSERT INTO datasets "
-                "(id, customer_id, name, description, status, size_bytes, file_count, created_at) "
-                "VALUES (?, ?, ?, ?, 'ready', ?, ?, ?)",
-                (dataset_id, customer_id, name, description, size_bytes, file_count, now),
+                "(id, customer_id, name, description, status, size_bytes, file_count, "
+                " visibility, created_at) "
+                "VALUES (?, ?, ?, ?, 'ready', ?, ?, ?, ?)",
+                (
+                    dataset_id,
+                    customer_id,
+                    name,
+                    description,
+                    size_bytes,
+                    file_count,
+                    visibility,
+                    now,
+                ),
             )
             self._conn.executemany(
                 "INSERT INTO dataset_files (dataset_id, filename, size_bytes, storage_path) "
@@ -237,13 +264,34 @@ class Database:
                 [(dataset_id, filename, size, path) for filename, size, path in files],
             )
             self._conn.commit()
-        return self.get_dataset(customer_id, dataset_id)  # type: ignore[return-value]
+        return self.get_accessible_dataset(customer_id, dataset_id)  # type: ignore[return-value]
 
     def get_dataset(self, customer_id: str, dataset_id: str) -> dict[str, Any] | None:
+        """仅按所有者读取（删除 / 共享开关等 owner 操作使用）。"""
         return self._query_one(
             "SELECT * FROM datasets WHERE id = ? AND customer_id = ?",
             (dataset_id, customer_id),
         )
+
+    def get_accessible_dataset(self, customer_id: str, dataset_id: str) -> dict[str, Any] | None:
+        """当前客户可见的数据集：自己的，或任何客户共享出来的。"""
+        return self._query_one(
+            "SELECT d.*, c.name AS owner_name "
+            "FROM datasets d JOIN customers c ON c.id = d.customer_id "
+            "WHERE d.id = ? AND (d.customer_id = ? OR d.visibility = 'shared')",
+            (dataset_id, customer_id),
+        )
+
+    def set_dataset_visibility(
+        self, customer_id: str, dataset_id: str, visibility: str
+    ) -> dict[str, Any] | None:
+        cursor = self._execute(
+            "UPDATE datasets SET visibility = ? WHERE id = ? AND customer_id = ?",
+            (visibility, dataset_id, customer_id),
+        )
+        if cursor.rowcount != 1:
+            return None
+        return self.get_accessible_dataset(customer_id, dataset_id)
 
     def get_dataset_files(self, dataset_id: str) -> list[dict[str, Any]]:
         return self._query(
@@ -252,21 +300,38 @@ class Database:
         )
 
     def list_datasets(
-        self, customer_id: str, page: int, size: int, q: str | None = None
+        self,
+        customer_id: str,
+        page: int,
+        size: int,
+        q: str | None = None,
+        *,
+        include_shared: bool = True,
     ) -> tuple[list[dict[str, Any]], int]:
-        where = ["customer_id = ?"]
+        if include_shared:
+            where = ["(d.customer_id = ? OR d.visibility = 'shared')"]
+        else:
+            where = ["d.customer_id = ?"]
         params: list[Any] = [customer_id]
         if q:
-            where.append("(name LIKE ? OR COALESCE(description, '') LIKE ?)")
+            where.append("(d.name LIKE ? OR COALESCE(d.description, '') LIKE ? OR c.name LIKE ?)")
             like = f"%{q.strip()}%"
-            params.extend([like, like])
+            params.extend([like, like, like])
         clause = " AND ".join(where)
-        total_row = self._query_one(f"SELECT COUNT(*) AS n FROM datasets WHERE {clause}", params)
+        total_row = self._query_one(
+            "SELECT COUNT(*) AS n FROM datasets d "
+            "JOIN customers c ON c.id = d.customer_id "
+            f"WHERE {clause}",
+            params,
+        )
         total = int(total_row["n"]) if total_row else 0
         rows = self._query(
-            f"SELECT * FROM datasets WHERE {clause} "
-            "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-            [*params, size, (page - 1) * size],
+            "SELECT d.*, c.name AS owner_name FROM datasets d "
+            "JOIN customers c ON c.id = d.customer_id "
+            f"WHERE {clause} "
+            "ORDER BY (d.customer_id = ?) DESC, d.created_at DESC, d.id DESC "
+            "LIMIT ? OFFSET ?",
+            [*params, customer_id, size, (page - 1) * size],
         )
         return rows, total
 
@@ -368,9 +433,10 @@ class Database:
         now = utc_now()
         self._execute(
             "INSERT INTO runs "
-            "(id, customer_id, notebook_id, notebook_name, dataset_id, dataset_name, name, "
+            "(id, customer_id, notebook_id, notebook_name, dataset_id, dataset_name, "
+            " dataset_owner_id, dataset_owner_name, name, "
             " status, kernel, parameters, timeout_seconds, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)",
             (
                 run_id,
                 customer_id,
@@ -378,6 +444,8 @@ class Database:
                 notebook.get("name"),
                 dataset["id"] if dataset else None,
                 dataset.get("name") if dataset else None,
+                dataset["customer_id"] if dataset else None,
+                dataset.get("owner_name") if dataset else None,
                 name,
                 kernel,
                 parameters_json,

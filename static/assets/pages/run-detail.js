@@ -190,11 +190,15 @@ export async function renderRunDetail(root, ctx) {
       run.id
     )}</span>`;
 
+    const datasetOwnerSuffix =
+      run.datasetShared && run.datasetOwnerName
+        ? ` · ${t("runs.sharedFrom", { name: run.datasetOwnerName })}`
+        : "";
     refs.info.innerHTML = [
       kvRow(t("runDetail.notebook"), escapeHtml(run.notebookName || "—")),
       kvRow(
         t("runDetail.dataset"),
-        escapeHtml(run.datasetName || t("runs.noDataset"))
+        escapeHtml(`${run.datasetName || t("runs.noDataset")}${datasetOwnerSuffix}`)
       ),
       kvRow(t("runDetail.kernel"), `<span class="mono">${escapeHtml(run.kernel || "—")}</span>`),
       kvRow(t("runDetail.created"), escapeHtml(formatDateTime(run.createdAt))),

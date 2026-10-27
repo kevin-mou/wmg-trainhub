@@ -26,8 +26,12 @@ def customer_public(row: dict[str, Any], *, include_token: bool = False) -> dict
 
 
 def dataset_public(
-    row: dict[str, Any], files: list[dict[str, Any]] | None = None
+    row: dict[str, Any],
+    files: list[dict[str, Any]] | None = None,
+    *,
+    viewer_customer_id: str | None = None,
 ) -> dict[str, Any]:
+    owner_id = row.get("customer_id")
     data = {
         "id": row["id"],
         "name": row["name"],
@@ -35,8 +39,13 @@ def dataset_public(
         "status": row["status"],
         "sizeBytes": row.get("size_bytes", 0),
         "fileCount": row.get("file_count", 0),
+        "shared": (row.get("visibility") or "private") == "shared",
+        "ownerId": owner_id,
+        "ownerName": row.get("owner_name"),
         "createdAt": row["created_at"],
     }
+    if viewer_customer_id is not None:
+        data["isOwner"] = owner_id == viewer_customer_id
     if files is not None:
         data["files"] = [
             {"filename": item["filename"], "sizeBytes": item["size_bytes"]} for item in files
@@ -77,6 +86,15 @@ def run_public(row: dict[str, Any], *, has_logs: bool | None = None) -> dict[str
         "notebookName": row.get("notebook_name"),
         "datasetId": row.get("dataset_id"),
         "datasetName": row.get("dataset_name"),
+        "datasetOwnerId": row.get("dataset_owner_id"),
+        "datasetOwnerName": (
+            row.get("dataset_owner_name")
+            if row.get("dataset_owner_id") and row.get("dataset_owner_id") != row.get("customer_id")
+            else None
+        ),
+        "datasetShared": bool(
+            row.get("dataset_owner_id") and row.get("dataset_owner_id") != row.get("customer_id")
+        ),
         "parameters": parameters,
         "timeoutSeconds": row.get("timeout_seconds"),
         "exitCode": row.get("exit_code"),

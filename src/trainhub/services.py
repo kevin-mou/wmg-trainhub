@@ -43,7 +43,8 @@ async def create_dataset(
     name: str | None,
     description: str | None,
     uploads: list[UploadFile],
-    ip: str | None,
+    shared: bool = False,
+    ip: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if not uploads:
         raise ApiError("请至少选择一个文件", 400)
@@ -96,6 +97,7 @@ async def create_dataset(
             size_bytes=total_bytes,
             file_count=len(saved),
             dataset_id=dataset_id,
+            visibility="shared" if shared else "private",
         )
     except Exception:
         shutil.rmtree(files_dir.parent, ignore_errors=True)
@@ -112,6 +114,15 @@ async def create_dataset(
         detail=dataset["name"],
         ip=ip,
     )
+    if shared:
+        db.add_activity(
+            customer_id,
+            "dataset.share",
+            target_type="dataset",
+            target_id=dataset["id"],
+            detail=dataset["name"],
+            ip=ip,
+        )
     return dataset, db.get_dataset_files(dataset["id"])
 
 
@@ -140,10 +151,38 @@ def delete_dataset(
     )
 
 
+def set_dataset_sharing(
+    *,
+    db: Database,
+    customer: dict[str, Any],
+    dataset_id: str,
+    shared: bool,
+    ip: str | None,
+) -> dict[str, Any]:
+    """只有所有者能切换共享；共享是可信场景下的可见性，不是安全边界。"""
+    dataset = db.get_dataset(customer["id"], dataset_id)
+    if dataset is None:
+        raise ApiError("数据集不存在", 404)
+    updated = db.set_dataset_visibility(
+        customer["id"], dataset_id, "shared" if shared else "private"
+    )
+    if updated is None:
+        raise ApiError("数据集不存在", 404)
+    db.add_activity(
+        customer["id"],
+        "dataset.share" if shared else "dataset.unshare",
+        target_type="dataset",
+        target_id=dataset_id,
+        detail=dataset["name"],
+        ip=ip,
+    )
+    return updated
+
+
 def dataset_download(
     *, db: Database, storage: Storage, customer: dict[str, Any], dataset_id: str
 ) -> tuple[Path, str]:
-    dataset = db.get_dataset(customer["id"], dataset_id)
+    dataset = db.get_accessible_dataset(customer["id"], dataset_id)
     if dataset is None:
         raise ApiError("数据集不存在", 404)
     files = db.get_dataset_files(dataset_id)
@@ -153,7 +192,7 @@ def dataset_download(
         single = Path(files[0]["storage_path"])
         if single.is_file():
             return single, files[0]["filename"]
-    zip_path = storage.dataset_zip_path(customer["id"], dataset_id)
+    zip_path = storage.dataset_zip_path(dataset["customer_id"], dataset_id)
     if not zip_path.is_file():
         build_zip(Path(files[0]["storage_path"]).parent, zip_path)
     return zip_path, f"{_download_stem(dataset['name'])}.zip"
@@ -285,7 +324,7 @@ def create_run(
         raise ApiError("Notebook 不存在", 404)
     dataset = None
     if dataset_id:
-        dataset = db.get_dataset(customer["id"], dataset_id)
+        dataset = db.get_accessible_dataset(customer["id"], dataset_id)
         if dataset is None:
             raise ApiError("数据集不存在", 404)
 

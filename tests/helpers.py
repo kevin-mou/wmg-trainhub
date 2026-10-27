@@ -65,11 +65,15 @@ async def upload_dataset(
     name: str = "dataset",
     filename: str = "a.txt",
     content: bytes = b"data-ok",
+    shared: bool = False,
 ) -> dict[str, Any]:
+    data: dict[str, str] = {"name": name}
+    if shared:
+        data["shared"] = "true"
     response = await client.post(
         "/api/datasets",
         headers=headers,
-        data={"name": name},
+        data=data,
         files=[("files", (filename, content, "application/octet-stream"))],
     )
     assert response.status_code == 200, response.text

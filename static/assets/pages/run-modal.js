@@ -8,6 +8,18 @@ function option(value, label, selected = false) {
   )}</option>`;
 }
 
+function datasetLabel(dataset) {
+  if (!dataset) return "";
+  if (!dataset.isOwner) {
+    return `${dataset.name} · ${t("runs.sharedFrom", {
+      name: dataset.ownerName || "?",
+    })}`;
+  }
+  return dataset.shared
+    ? `${dataset.name} · ${t("datasets.sharedBadge")}`
+    : dataset.name;
+}
+
 export async function openRunModal({ navigate, preselectedNotebookId = null }) {
   let notebooks = [];
   let datasets = [];
@@ -79,7 +91,9 @@ export async function openRunModal({ navigate, preselectedNotebookId = null }) {
         <label for="run-dataset">${escapeHtml(t("runModal.dataset"))}</label>
         <select class="select" id="run-dataset">
           ${option("", t("runModal.datasetNone"), true)}
-          ${datasets.map((dataset) => option(dataset.id, dataset.name)).join("")}
+          ${datasets
+            .map((dataset) => option(dataset.id, datasetLabel(dataset)))
+            .join("")}
         </select>
       </div>
       <div class="field">

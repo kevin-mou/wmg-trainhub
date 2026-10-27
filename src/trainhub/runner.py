@@ -333,7 +333,10 @@ class RunExecutor:
             writer.line("TrainHub 训练开始")
             writer.line(f"任务：{run['name']}（{run_id}）")
             writer.line(f"Notebook：{run['notebook_name']}")
-            writer.line(f"数据集：{run['dataset_name'] or '无'}")
+            dataset_label = run["dataset_name"] or "无"
+            if run.get("dataset_owner_id") and run["dataset_owner_id"] != run["customer_id"]:
+                dataset_label += f"（来自 {run.get('dataset_owner_name') or '其他客户'}）"
+            writer.line(f"数据集：{dataset_label}")
             writer.line(f"提交时间：{run['created_at']}")
 
             bits = _jupyter_bits()

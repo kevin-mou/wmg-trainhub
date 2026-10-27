@@ -141,6 +141,7 @@ export const icons = {
   logout: icon('<path d="M14.5 4.5H18a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5h-3.5"/><path d="M4.5 12H15"/><path d="m11 7.5 4.5 4.5L11 16.5"/>'),
   cpu: icon('<rect x="6.5" y="6.5" width="11" height="11" rx="2"/><path d="M9.8 9.8h4.4v4.4H9.8z"/><path d="M9.5 3.5v3M14.5 3.5v3M9.5 17.5v3M14.5 17.5v3M3.5 9.5h3M3.5 14.5h3M17.5 9.5h3M17.5 14.5h3"/>'),
   eye: icon('<path d="M2.8 12s3.4-6 9.2-6 9.2 6 9.2 6-3.4 6-9.2 6-9.2-6-9.2-6Z"/><circle cx="12" cy="12" r="2.7"/>'),
+  share: icon('<circle cx="18" cy="5" r="2.4"/><circle cx="6" cy="12" r="2.4"/><circle cx="18" cy="19" r="2.4"/><path d="m8.2 10.8 7.6-4.4M8.2 13.2l7.6 4.4"/>'),
   eyeOff: icon('<path d="m4 4 16 16"/><path d="M9.9 5.2A9.6 9.6 0 0 1 12 5c5.8 0 9.2 7 9.2 7a15.6 15.6 0 0 1-3.2 4.1"/><path d="M6.2 6.7C4 8.4 2.8 12 2.8 12s3.4 7 9.2 7a9.7 9.7 0 0 0 4-.9"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>'),
   chevronDown: icon('<path d="m6 9.5 6 6 6-6"/>'),
   arrowUpRight: icon('<path d="M7 17 17 7"/><path d="M8.5 7H17v8.5"/>'),

@@ -9,11 +9,13 @@ from fastapi.responses import FileResponse
 from ..config import Settings
 from ..db import Database
 from ..responses import ApiError, ok, page_data
+from ..schemas import DatasetSharingUpdate
 from ..serializers import dataset_public
 from ..services import (
     create_dataset,
     dataset_download,
     delete_dataset,
+    set_dataset_sharing,
 )
 from ..storage import Storage
 from .deps import client_ip, current_customer, get_db, get_settings, get_storage
@@ -30,7 +32,8 @@ def list_datasets(
     db: Database = Depends(get_db),
 ) -> dict:
     rows, total = db.list_datasets(customer["id"], page, size, q)
-    return ok(page_data([dataset_public(row) for row in rows], total, page, size))
+    records = [dataset_public(row, viewer_customer_id=customer["id"]) for row in rows]
+    return ok(page_data(records, total, page, size))
 
 
 @router.post("")
@@ -38,6 +41,7 @@ async def upload_dataset(
     request: Request,
     name: str | None = Form(None),
     description: str | None = Form(None),
+    shared: bool = Form(False),
     files: list[UploadFile] = File(...),
     customer: dict = Depends(current_customer),
     db: Database = Depends(get_db),
@@ -52,9 +56,14 @@ async def upload_dataset(
         name=name,
         description=description,
         uploads=files,
+        shared=shared,
         ip=client_ip(request),
     )
-    return ok(dataset_public(dataset, dataset_files), message="数据集已上传", code=201)
+    return ok(
+        dataset_public(dataset, dataset_files, viewer_customer_id=customer["id"]),
+        message="数据集已上传",
+        code=201,
+    )
 
 
 @router.get("/{dataset_id}")
@@ -63,10 +72,16 @@ def get_dataset(
     customer: dict = Depends(current_customer),
     db: Database = Depends(get_db),
 ) -> dict:
-    dataset = db.get_dataset(customer["id"], dataset_id)
+    dataset = db.get_accessible_dataset(customer["id"], dataset_id)
     if dataset is None:
         raise ApiError("数据集不存在", 404)
-    return ok(dataset_public(dataset, db.get_dataset_files(dataset_id)))
+    return ok(
+        dataset_public(
+            dataset,
+            db.get_dataset_files(dataset_id),
+            viewer_customer_id=customer["id"],
+        )
+    )
 
 
 @router.get("/{dataset_id}/download")
@@ -89,6 +104,28 @@ async def download_dataset(
         ip=client_ip(request),
     )
     return FileResponse(Path(path), filename=filename)
+
+
+@router.patch("/{dataset_id}/sharing")
+def update_dataset_sharing(
+    request: Request,
+    dataset_id: str,
+    payload: DatasetSharingUpdate,
+    customer: dict = Depends(current_customer),
+    db: Database = Depends(get_db),
+) -> dict:
+    dataset = set_dataset_sharing(
+        db=db,
+        customer=customer,
+        dataset_id=dataset_id,
+        shared=payload.shared,
+        ip=client_ip(request),
+    )
+    message = "数据集已共享" if payload.shared else "已取消共享"
+    return ok(
+        dataset_public(dataset, viewer_customer_id=customer["id"]),
+        message=message,
+    )
 
 
 @router.delete("/{dataset_id}")

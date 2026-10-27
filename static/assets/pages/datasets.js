@@ -112,7 +112,8 @@ export async function renderDatasets(root, ctx) {
 
     tableHost.innerHTML = `<div class="table-scroll"><table class="table">
       <thead><tr>
-        <th style="width:42%">${escapeHtml(t("datasets.col.name"))}</th>
+        <th style="width:36%">${escapeHtml(t("datasets.col.name"))}</th>
+        <th>${escapeHtml(t("datasets.col.owner"))}</th>
         <th>${escapeHtml(t("datasets.col.files"))}</th>
         <th>${escapeHtml(t("datasets.col.size"))}</th>
         <th>${escapeHtml(t("datasets.col.created"))}</th>
@@ -123,13 +124,25 @@ export async function renderDatasets(root, ctx) {
           .map(
             (item) => `<tr>
               <td>
-                <div class="cell-main"><span class="truncate">${escapeHtml(item.name)}</span></div>
+                <div class="cell-main">
+                  <span class="truncate">${escapeHtml(item.name)}</span>
+                  ${
+                    item.shared
+                      ? `<span class="badge badge-neutral">${escapeHtml(
+                          t("datasets.sharedBadge")
+                        )}</span>`
+                      : ""
+                  }
+                </div>
                 ${
                   item.description
                     ? `<div class="cell-sub">${escapeHtml(item.description)}</div>`
                     : ""
                 }
               </td>
+              <td class="muted nowrap">${escapeHtml(
+                item.isOwner ? t("datasets.mine") : item.ownerName || "—"
+              )}</td>
               <td class="mono">${escapeHtml(
                 t("datasets.filesCount", { n: item.fileCount })
               )}</td>
@@ -142,11 +155,26 @@ export async function renderDatasets(root, ctx) {
                   )}" title="${escapeHtml(t("common.download"))}" aria-label="${escapeHtml(
                     t("common.download")
                   )}">${icons.download}</button>
-                  <button type="button" class="icon-btn" data-delete="${escapeHtml(
-                    item.id
-                  )}" data-name="${escapeHtml(item.name)}" title="${escapeHtml(
-                    t("common.delete")
-                  )}" aria-label="${escapeHtml(t("common.delete"))}">${icons.trash}</button>
+                  ${
+                    item.isOwner
+                      ? `<button type="button" class="icon-btn" data-share="${escapeHtml(
+                          item.id
+                        )}" data-shared="${item.shared ? "1" : "0"}" title="${escapeHtml(
+                          item.shared ? t("datasets.unshare") : t("datasets.share")
+                        )}" aria-label="${escapeHtml(
+                          item.shared ? t("datasets.unshare") : t("datasets.share")
+                        )}">${icons.share}</button>`
+                      : ""
+                  }
+                  ${
+                    item.isOwner
+                      ? `<button type="button" class="icon-btn" data-delete="${escapeHtml(
+                          item.id
+                        )}" data-name="${escapeHtml(item.name)}" title="${escapeHtml(
+                          t("common.delete")
+                        )}" aria-label="${escapeHtml(t("common.delete"))}">${icons.trash}</button>`
+                      : ""
+                  }
                 </div>
               </td>
             </tr>`
@@ -166,6 +194,26 @@ export async function renderDatasets(root, ctx) {
           toast(t("toast.downloadStarted"), "info");
         } catch (error) {
           toast(error.message, "error");
+        }
+      });
+    });
+
+    tableHost.querySelectorAll("[data-share]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const nextShared = button.dataset.shared !== "1";
+        button.disabled = true;
+        try {
+          await http.patch(`/api/datasets/${button.dataset.share}/sharing`, {
+            shared: nextShared,
+          });
+          toast(
+            nextShared ? t("datasets.toast.shared") : t("datasets.toast.unshared"),
+            "success"
+          );
+          load(page);
+        } catch (error) {
+          toast(error.message, "error");
+          button.disabled = false;
         }
       });
     });
@@ -206,6 +254,13 @@ export async function renderDatasets(root, ctx) {
           <label for="ds-description">${escapeHtml(t("datasets.modal.description"))}</label>
           <textarea class="textarea" id="ds-description" maxlength="500"
             placeholder="${escapeHtml(t("datasets.modal.descriptionPlaceholder"))}"></textarea>
+        </div>
+        <div class="field">
+          <label class="check-row" for="ds-shared">
+            <input type="checkbox" id="ds-shared" />
+            <span>${escapeHtml(t("datasets.modal.shared"))}</span>
+          </label>
+          <span class="hint">${escapeHtml(t("datasets.modal.sharedHint"))}</span>
         </div>
         <div class="field">
           <label>${escapeHtml(t("datasets.col.files"))}</label>
@@ -293,6 +348,9 @@ export async function renderDatasets(root, ctx) {
           const description = dialog.querySelector("#ds-description").value.trim();
           if (name) formData.append("name", name);
           if (description) formData.append("description", description);
+          if (dialog.querySelector("#ds-shared").checked) {
+            formData.append("shared", "true");
+          }
           for (const file of selected) formData.append("files", file, file.name);
 
           submit.disabled = true;

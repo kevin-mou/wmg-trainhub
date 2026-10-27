@@ -32,7 +32,7 @@ def overview(
     storage: Storage = Depends(get_storage),
 ) -> dict:
     counts = db.run_status_counts(customer["id"])
-    datasets_total = db.list_datasets(customer["id"], 1, 1)[1]
+    datasets_total = db.list_datasets(customer["id"], 1, 1, include_shared=False)[1]
     notebooks_total = db.list_notebooks(customer["id"], 1, 1)[1]
     succeeded = counts.get("succeeded", 0)
     failed = counts.get("failed", 0)
