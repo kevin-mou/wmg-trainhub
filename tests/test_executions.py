@@ -62,6 +62,16 @@ async def _submit(
     return response.json()["data"]
 
 
+async def test_platform_execution_passes_dataset_name_to_kernel(client):
+    source = "import os\nprint('DSNAME=' + os.environ.get('WMG_DATASET_NAME', ''))\n"
+    run = await _submit(client, _code_bundle(source), datasetName="demo", datasetVersion=3)
+    assert run["datasetName"] == "demo"
+    final = await _wait_admin(client, run["id"])
+    assert final["status"] == "succeeded", final.get("message")
+    logs = await client.get(f"/api/admin/runs/{run['id']}/logs", headers=ADMIN)
+    assert "DSNAME=demo" in logs.text
+
+
 async def test_platform_execution_bundle_runs_and_reports(client):
     source = (
         "import os\n"
@@ -93,6 +103,73 @@ async def test_platform_execution_bundle_runs_and_reports(client):
     paths = [item["path"] for item in outputs.json()["data"]["outputs"]["files"]]
     assert "checkpoint.txt" in paths
     assert "trainhub_result.json" in paths
+
+
+async def test_admin_customer_can_use_explicit_token(client):
+    token = "trh_explicit_identity_token_0001"
+    created = await client.post(
+        "/api/admin/customers",
+        headers=ADMIN,
+        json={"name": "指定令牌客户", "token": token},
+    )
+    assert created.status_code == 200, created.text
+    data = created.json()["data"]
+    assert data["token"] == token
+
+    me = await client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.status_code == 200
+    assert me.json()["data"]["name"] == "指定令牌客户"
+
+    duplicated = await client.post(
+        "/api/admin/customers",
+        headers=ADMIN,
+        json={"name": "重复令牌", "token": token},
+    )
+    assert duplicated.status_code == 409, duplicated.text
+
+
+async def test_platform_execution_attributed_to_identity_customer(client):
+    created = await client.post(
+        "/api/admin/customers", headers=ADMIN, json={"name": "WMG 平台身份"}
+    )
+    assert created.status_code == 200, created.text
+    customer = created.json()["data"]
+    token = customer["token"]
+    customer_headers = {"Authorization": f"Bearer {token}"}
+
+    run = await _submit(
+        client,
+        _code_bundle("print('identity ok')\n"),
+        customerId=customer["id"],
+    )
+    assert run["customerId"] == customer["id"]
+
+    # 平台身份用客户令牌登录控制台（客户 API）应能看到这次通过 API 发起的执行
+    listing = await client.get("/api/runs", headers=customer_headers)
+    assert listing.status_code == 200, listing.text
+    ids = [item["id"] for item in listing.json()["data"]["records"]]
+    assert run["id"] in ids
+    detail = await client.get(f"/api/runs/{run['id']}", headers=customer_headers)
+    assert detail.status_code == 200
+
+    final = await _wait_admin(client, run["id"])
+    assert final["status"] == "succeeded", final.get("message")
+    logs = await client.get(f"/api/runs/{run['id']}/logs", headers=customer_headers)
+    assert "identity ok" in logs.text
+
+
+async def test_platform_execution_rejects_unknown_identity_customer(client):
+    data = {
+        "name": "bad identity",
+        "entry": "train.ipynb",
+        "parameters": "{}",
+        "timeoutSeconds": "60",
+        "customerId": "c_missing",
+    }
+    files = {"code": ("code.zip", _code_bundle("print('x')\n"), "application/zip")}
+    response = await client.post("/api/admin/executions", headers=ADMIN, data=data, files=files)
+    assert response.status_code == 400, response.text
+    assert "执行身份客户不存在" in response.text
 
 
 async def test_executor_status_and_system_customer_hidden(client):
@@ -187,3 +264,19 @@ async def test_single_task_instance_rejects_second_submission(client):
     assert response.status_code == 409, response.text
     assert "单任务" in response.text
     await client.post(f"/api/admin/runs/{first['id']}/cancel", headers=ADMIN)
+
+
+async def test_customer_overview_reports_platform_busy(client, headers):
+    """平台任务占用单例执行器时，客户概览必须显示繁忙（不能只看自己的队列）。"""
+    run = await _submit(
+        client,
+        _code_bundle("import time\ntime.sleep(5)\n"),
+        name="busy-check",
+    )
+    try:
+        overview = (await client.get("/api/overview", headers=headers)).json()["data"]
+        assert overview["stats"]["activeRuns"] == 0
+        assert overview["executor"]["busy"] is True
+        assert overview["executor"]["platformActiveRuns"] >= 1
+    finally:
+        await client.post(f"/api/admin/runs/{run['id']}/cancel", headers=ADMIN)

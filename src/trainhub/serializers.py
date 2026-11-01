@@ -39,6 +39,7 @@ def dataset_public(
         "status": row["status"],
         "sizeBytes": row.get("size_bytes", 0),
         "fileCount": row.get("file_count", 0),
+        "hasZip": bool(row.get("has_zip")),
         "shared": (row.get("visibility") or "private") == "shared",
         "ownerId": owner_id,
         "ownerName": row.get("owner_name"),
@@ -60,6 +61,7 @@ def notebook_public(row: dict[str, Any]) -> dict[str, Any]:
         "filename": row["filename"],
         "sizeBytes": row.get("size_bytes", 0),
         "cellCount": row.get("cell_count", 0),
+        "datasetId": row.get("dataset_id"),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
@@ -81,6 +83,7 @@ def run_public(row: dict[str, Any], *, has_logs: bool | None = None) -> dict[str
         "id": row["id"],
         "name": row["name"],
         "status": row["status"],
+        "customerId": row.get("customer_id"),
         "kernel": row.get("kernel"),
         "notebookId": row.get("notebook_id"),
         "notebookName": row.get("notebook_name"),

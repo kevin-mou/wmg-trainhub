@@ -27,8 +27,11 @@ export async function renderNotebooks(root, ctx) {
         <p class="page-sub">${escapeHtml(t("notebooks.subtitle"))}</p>
       </div>
       <div class="page-head-actions">
-        <button type="button" class="btn btn-primary" id="nb-upload">${icons.upload}${escapeHtml(
-          t("notebooks.upload")
+        <button type="button" class="btn btn-primary" id="nb-create">${icons.plus}${escapeHtml(
+          t("notebooks.create")
+        )}</button>
+        <button type="button" class="btn btn-secondary" id="nb-import">${icons.upload}${escapeHtml(
+          t("notebooks.import")
         )}</button>
       </div>
     </div>
@@ -52,7 +55,8 @@ export async function renderNotebooks(root, ctx) {
   const countHost = root.querySelector("#nb-count");
   const searchInput = root.querySelector("#nb-search");
 
-  root.querySelector("#nb-upload").addEventListener("click", () => openUpload());
+  root.querySelector("#nb-create").addEventListener("click", () => ctx.navigate("/notebooks/new"));
+  root.querySelector("#nb-import").addEventListener("click", () => openImport());
   searchInput.addEventListener(
     "input",
     debounce(() => {
@@ -102,12 +106,20 @@ export async function renderNotebooks(root, ctx) {
         ${
           query
             ? ""
-            : `<button class="btn btn-primary" id="nb-empty-upload">${escapeHtml(
-                t("notebooks.empty.action")
-              )}</button>`
+            : `<div class="empty-actions">
+                <button class="btn btn-primary" id="nb-empty-create">${escapeHtml(
+                  t("notebooks.empty.action")
+                )}</button>
+                <button class="btn btn-secondary" id="nb-empty-import">${escapeHtml(
+                  t("notebooks.empty.importAction")
+                )}</button>
+              </div>`
         }
       </div>`;
-      tableHost.querySelector("#nb-empty-upload")?.addEventListener("click", () => openUpload());
+      tableHost
+        .querySelector("#nb-empty-create")
+        ?.addEventListener("click", () => ctx.navigate("/notebooks/new"));
+      tableHost.querySelector("#nb-empty-import")?.addEventListener("click", () => openImport());
       return;
     }
 
@@ -124,7 +136,11 @@ export async function renderNotebooks(root, ctx) {
           .map(
             (item) => `<tr>
               <td>
-                <div class="cell-main"><span class="truncate">${escapeHtml(item.name)}</span></div>
+                <div class="cell-main">
+                  <a class="cell-name-link truncate" href="#/notebooks/${encodeURIComponent(
+                    item.id
+                  )}/edit">${escapeHtml(item.name)}</a>
+                </div>
                 <div class="cell-sub mono">${escapeHtml(item.filename)}</div>
               </td>
               <td class="mono">${item.cellCount}</td>
@@ -135,6 +151,11 @@ export async function renderNotebooks(root, ctx) {
                   <button type="button" class="btn btn-secondary btn-sm" data-run="${escapeHtml(
                     item.id
                   )}">${escapeHtml(t("notebooks.run"))}</button>
+                  <button type="button" class="icon-btn" data-edit="${escapeHtml(
+                    item.id
+                  )}" title="${escapeHtml(t("notebooks.edit"))}" aria-label="${escapeHtml(
+                    t("notebooks.edit")
+                  )}">${icons.edit}</button>
                   <button type="button" class="icon-btn" data-download="${escapeHtml(
                     item.id
                   )}" title="${escapeHtml(t("common.download"))}" aria-label="${escapeHtml(
@@ -156,6 +177,12 @@ export async function renderNotebooks(root, ctx) {
     tableHost.querySelectorAll("[data-run]").forEach((button) => {
       button.addEventListener("click", () =>
         openRunModal({ navigate: ctx.navigate, preselectedNotebookId: button.dataset.run })
+      );
+    });
+
+    tableHost.querySelectorAll("[data-edit]").forEach((button) => {
+      button.addEventListener("click", () =>
+        ctx.navigate(`/notebooks/${encodeURIComponent(button.dataset.edit)}/edit`)
       );
     });
 
@@ -195,7 +222,7 @@ export async function renderNotebooks(root, ctx) {
     });
   }
 
-  function openUpload() {
+  function openImport() {
     let selected = null;
     openDialog({
       title: t("notebooks.modal.title"),
@@ -291,9 +318,9 @@ export async function renderNotebooks(root, ctx) {
           submit.disabled = true;
           submit.textContent = t("common.saving");
           try {
-            await upload("/api/notebooks", formData);
+            await upload("/api/notebooks/import", formData);
             close();
-            toast(t("toast.uploaded"), "success");
+            toast(t("toast.imported"), "success");
             load(1);
           } catch (error) {
             showError(error.message);

@@ -31,7 +31,7 @@ TrainHub 是 WMG 仓库下的独立子工程，也是可以单独部署的训练
 TrainHub 的目标是把这条链路压缩到一个进程和一个数据目录里：
 
 - **客户自助**：每个客户一个长期访问令牌，登录后只看到自己的工作区。
-- **训练可交付**：上传数据集和 Notebook，提交任务，看到实时日志、训练指标、执行环境与产物。
+- **训练可交付**：上传数据集，新建或导入 Notebook，提交任务，看到实时日志、训练指标、执行环境与产物。
 - **低依赖**：FastAPI + SQLite + 进程内执行器 + 静态 SPA，不依赖 Redis、消息队列、外部调度器或前端构建链。
 - **节点可离线**：控制台由服务端直接托管，GPU 节点无外网也能使用。
 - **控制面可接入**：平台模型运营可以把代码包、数据集和资产包推给 TrainHub，按 SSE 收日志、结束后取产物；TrainHub 本身不主动连接控制面。
@@ -116,6 +116,7 @@ FastAPI（单实例，uvicorn 单 worker）
 - 当前没有容器、namespace、每客户独立 UID 或 CPU/GPU cgroup 隔离。
 - 因此只应面向**可信客户 + 专用节点**。若要对不可信客户开放，请为每个客户部署独立实例/独立 Unix 用户，或把执行器替换为容器化方案。
 - 服务重启会中断正在执行的任务；排队任务会在重启后恢复。SIGKILL/断电可能留下孤儿 `ipykernel_launcher` 进程，运维可用 `ps` 检查。
+- 编辑器的“运行单元格”会为每个 Notebook 懒启动一个独立 Jupyter kernel，**同样与服务使用同一个操作系统用户**；会话工作目录在 `sessions/<客户>/<Notebook>/<会话>`，离开编辑器、空闲超时或服务停止时关闭。交互式 kernel 与训练队列是两条独立进程路径，不能把前者当作安全隔离。
 
 ### 3.3 调度与资源
 
@@ -124,6 +125,7 @@ FastAPI（单实例，uvicorn 单 worker）
 - 平台推送任务与客户 Web UI 任务共用执行槽；实例已有排队/运行任务时，新的平台推送返回 `409`，不排队、不抢占。
 - 节点硬件（CPU/GPU/磁盘/内核）可通过管理 API `GET /api/admin/executor/status` 只读查询，但 TrainHub 不做资源预留。
 - 平台控制面通过主动探测该端点判断节点忙闲；TrainHub 不发送心跳、不保存控制面地址。
+- 交互式 Notebook 会话受 `TRAINHUB_MAX_KERNEL_SESSIONS`（默认 4）限制，空闲 `TRAINHUB_KERNEL_SESSION_IDLE_SECONDS`（默认 1800 秒）后回收；单单元格执行上限由 `TRAINHUB_KERNEL_CELL_TIMEOUT_SECONDS`（默认 300 秒）控制。
 
 ### 3.4 数据、日志与保留
 
@@ -137,7 +139,8 @@ FastAPI（单实例，uvicorn 单 worker）
 ### 3.5 结果与版本语义
 
 - TrainHub **只负责执行**：不保存/解释客户 Notebook 的版本语义，也不保存平台推送代码包的版本线；版本由控制面作业记录。
-- 客户上传的 Notebook 和数据集是独立对象，没有版本线；每次上传是一个新对象。
+- 客户新建/导入的 Notebook 是独立对象，没有版本线；编辑会更新同一个对象，不保留历史版本。数据集同样每次上传是一个新对象。
+- 有排队/执行中的任务引用某个 Notebook 时，禁止编辑该 Notebook（返回 `409`）；避免排队任务读到保存到一半的内容。
 - `OUTPUT_DIR/trainhub_result.json` 是平台成果桥的**最终结果清单**：模型名、基座、产物路径、最终指标等，供模型运营导入。
 - `logs/metrics.jsonl` 是**过程观测**：不参与模型运营导入决策。两者语义不同，不互为替代。
 - `environment.json` 区分 `service`（TrainHub 服务进程的 Python/平台/主机/CPU）与 `kernel`（Notebook 的 kernelspec 标识）：
@@ -152,6 +155,11 @@ FastAPI（单实例，uvicorn 单 worker）
 - 平台到 TrainHub 之间会传输管理令牌（请求头）与客户令牌明文（创建/重置响应），请使用 HTTPS 或把节点限制在受控内网；平台侧的 `TRAINHUB_VERIFY_TLS=false` 只用于自签证书测试环境。
 - 上传上限：`TRAINHUB_MAX_DATASET_MB` / `TRAINHUB_MAX_NOTEBOOK_MB` / `TRAINHUB_MAX_CODE_MB` / `TRAINHUB_MAX_ASSETS_MB`；日志上限 `TRAINHUB_MAX_LOG_MB`。接口层未做请求频率限制，公网部署应在反向代理上限制速率与并发。
 - 下载路径做了穿越校验；ZIP 打包不跟随符号链接，避免产物把节点上的外部文件打包出去。
+- **执行隔离（2026-11-01）**：Linux 节点默认启用 Docker 沙箱（`TRAINHUB_SANDBOX=docker`）：每个交互式内核/训练任务一个临时容器，非 root、只读根文件系统、`cap-drop ALL`、`no-new-privileges`、CPU/内存/PID 限制、默认 `--network none`；只挂载会话 `work`/`home`/IPC、选中的数据集（只读）、共享模型缓存（默认只读）和 `trainhub_runtime`（只读），不挂 `.env`、数据库、代码仓库或 Docker socket。容器结束即删除，启动时按标签清理遗留容器。
+- **macOS/MLX 节点不能使用 Docker 沙箱**：Docker 在 macOS 上是 Linux 容器，MLX 依赖 macOS/Metal，无法运行；macOS 节点必须 `TRAINHUB_SANDBOX=none`，只适合可信客户/专用设备。
+- **`none` 模式仍然是同用户子进程**，不是安全边界；本机内核已改为**最小环境白名单**（不再整份继承 `os.environ`，默认不传 `TRAINHUB_ADMIN_TOKEN`、`HF_TOKEN`、数据库/云凭据等），但这只能降低误泄，不能阻止同用户读取 `.env`/SQLite/其他客户目录。
+- `TRAINHUB_SANDBOX_RUN_AS` 默认服务用户的 `uid:gid`；服务不能以 root 运行 Docker 沙箱。Docker 组本身等价于 root 权限，生产建议 rootless Docker/Podman，并把 7470 限制在受控网络。
+- 网络 `none` 时容器内 `HF_HUB_OFFLINE=1`，模型必须先在节点上用 `trainhub.cli models pull` 预拉；需要 Notebook 联网时显式设置 `TRAINHUB_SANDBOX_NETWORK` 并接受相应出口风险。
 - 登录页「记住令牌」Cookie 与 localStorage 同属浏览器可读凭据；共享设备请取消勾选。
 
 ### 3.7 设计取舍：刻意不做的事
@@ -184,6 +192,8 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli create-customer --name "Acme Lab
 
 打开 `http://127.0.0.1:7470`，粘贴创建客户时输出的访问令牌即可进入控制台。
 
+> **执行沙箱提示**：Linux 节点默认 `TRAINHUB_SANDBOX=docker`，需要先构建/拉取沙箱镜像（见 7.1）；本地开发若暂时不用 Docker，在 `.env` 设置 `TRAINHUB_SANDBOX=none`（只适合可信本地环境）。macOS/MLX 节点必须 `none`。
+
 也可以直接用模块启动：
 
 ```bash
@@ -192,18 +202,38 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli serve --host 127.0.0.1 --port 74
 
 `trainhub.cli` 与 `start.sh` 都读取子工程根目录的同一份 `.env`（进程环境优先）。**改了 `TRAINHUB_DATA_DIR` 后一定要让 CLI 与服务使用同一份 `.env`**：两者指向不同的库时，会出现“客户创建成功、令牌却登录无效”。
 
-仓库自带示例 Notebook `examples/hello_trainhub.ipynb`：上传它（以及任意数据集），提交一次训练，就能看到实时日志、参数传递、训练指标曲线与产物下载的完整链路。
+仓库自带示例 Notebook `examples/hello_trainhub.ipynb`：导入它（以及任意数据集），提交一次训练，就能看到实时日志、参数传递、训练指标曲线与产物下载的完整链路。
 
 ### 4.2 客户工作台
 
 登录后左侧导航包括：
 
 - **概览**：客户信息、数据集/Notebook/运行统计、存储水位、进行中任务与最近任务。
-- **数据集**：上传多文件数据集；默认私有；所有者可以共享/取消共享、下载、删除。
-- **Notebooks**：上传 `.ipynb`、下载原文件、删除（有活动任务时返回 `409`）。
+- **数据集**：上传多文件或整个目录（保留相对路径，自动去掉共同顶层目录）；ZIP 可一键解压为目录内容；点击数据集名称查看文件清单（相对路径与大小）；默认私有；所有者可以共享/取消共享、下载、删除。
+- **Notebooks**：**新建 Notebook 默认进入手动编辑器**；也可以点击「导入 .ipynb」导入已有文件。支持下载（纯脚本 `.ipynb`，会自动挂载最新且代码匹配的 Session 快照输出）、编辑、删除（有活动任务时返回 `409`）。
 - **训练任务**：提交、查看、取消、删除运行。
-- **活动记录**：上传、提交、下载、删除等操作审计。
+- **活动记录**：上传、提交、编辑、下载、删除等操作审计。
 - **账户**：客户资料、令牌脱敏展示、语言/主题切换。
+
+#### 新建与编辑 Notebook
+
+「Notebooks」页面的主按钮是「新建 Notebook」，点击进入手动编辑器：
+
+- 默认带一个自动识别类型的空单元；可以添加代码、描述（Markdown）、原始（raw）单元。
+- 每个单元是独立编辑器：**非编辑态显示预览**（Markdown 渲染、代码纯文本），点击预览进入编辑态；失焦后回到预览。Markdown 预览按普通文档排版，不显示 cell 卡片背景、边框和头部标题。
+- 代码单元使用 **CodeMirror 6**（Python/Markdown 语法高亮、行内换行、撤销/重做）；非编辑态的代码预览也使用同一 Python 解析器做只读语法高亮。Markdown 预览由 marked + DOMPurify 渲染，原始 HTML/SVG 会被清理。
+- 单元类型默认为「自动」，按内容判断 code / markdown / raw，也可以随时手动切换。
+- 编辑器顶部（名称下方）保留精简工具栏：**运行**（按顺序运行全部代码单元格）、重启内核（清空变量与导入状态）、下载（`.py`/`.md`/`.txt`）；工具栏最右侧是 Kaggle 风格的运行状态标签（`编辑中` / `运行中`）。每个 cell 最左侧的 prompt 槽位显示 `[cell序号]`；选中/聚焦代码单元时，序号下方出现运行按钮（运行本格，前置未执行或已修改时自动补跑）。cell 头部左侧是类型切换下拉；进入编辑态时头部右侧显示六个快捷操作：下方插入、上方插入、上移、下移、复制、删除。Markdown 预览不显示头部，需要点击进入编辑后才能切换类型。工具栏在页面滚动时吸顶在顶部栏下方，按钮 tooltip 会跟随视口避让并在窄屏自动换行。工具栏还包含**数据集选择**：选中结果持久化到该 Notebook，运行单元格时挂载到 `WMG_DATASET_DIR`（运行中不可切换，数据集支持目录结构）。
+- 快捷键：`A` / `B` 在选中单元上方/下方插入代码单元，`D` `D` 删除，`Ctrl/Cmd + S` 保存，`Ctrl/Cmd + Shift + ↑/↓` 移动单元。
+- 页面顶部标题直接显示 Notebook 名称，名称右侧的编辑图标可进入就地改名（失焦或回车提交、Esc 取消；改名算脚本修改，需保存）；保存后写入服务器的 `.ipynb` 文件，并出现在 Notebook 列表中。
+- 列表里点击 Notebook 名称或编辑图标，会加载现有内容继续编辑；已导入的 Notebook 也可以编辑，保存时会保留原有单元格 metadata、输出与顶层 metadata。
+- 代码单元卡片下方显示**运行输出回显（只读）**：stdout/stderr、异常、`text/plain`、`application/json` 以及 PNG/JPEG/GIF/WebP 图片；HTML/SVG 等不可信内容不渲染，只提示已省略。输出来自独立 Session 快照，不属于 `.ipynb` 脚本内容；输出区右上角的复制按钮可一键复制该单元格的全部文本输出（图片等非文本块不参与复制）。
+- 右侧栏分两个区块：**「目录」**从 Markdown 标题生成（忽略代码块内的 `#`），**「单元格」**列出全部单元格（序号 + 类型 + 首个非空行摘要），点击都会选中并滚动到对应单元格，当前单元格在两处都高亮；窄屏时右侧栏移到上方。
+- 有排队/执行中的训练任务引用该 Notebook 时，保存返回 `409`，避免排队任务读到保存到一半的内容。
+- **运行单元格**使用按 Notebook 懒启动的交互式 Jupyter kernel：连续运行共享变量/导入状态，输出写回当前单元作为运行回显，**执行结束后若有输出会自动滚动到该单元的输出区**（错误 traceback 同样适用）。单元格运行按钮的默认动作是**「运行本格 + 自动补前置」**：先在同一内核里按顺序补跑尚未执行、或源码自上次成功执行后已变化的**前置代码单元格**，再运行目标单元格——任意单元格都可以直接点运行，无需手动逐格执行上面的单元格；已执行且源码未变的前置单元格会跳过，不重复产生副作用；点击运行的那一格则总是重新执行（跳过它会让点击毫无反应）。工具栏的**运行**是**「运行全部」**：按顺序执行全部代码单元格、不跳过已执行格，用于完整重放或首次执行整本脚本；工具栏另提供**「重启内核」**（丢弃内核状态、不运行代码，之后可用「运行」或单元格按钮干净重跑）。**训练任务（含平台推送的执行）排队/运行期间不允许运行单元格**：节点是单任务实例、GPU 独占，执行接口直接返回 409 并点名占用中的任务；任务结束自动恢复（内核启动本身不受限，仅执行时把关）。**执行是后台任务**：点击运行后服务端在后台执行并记录运行态（当前单元格、逐格状态与输出），接口立即返回。输出通过 **SSE 事件流实时回显**（`GET /api/notebooks/{id}/runs/stream?runId=`）：连接后先发 `state` 快照（补齐已产生的输出），之后按变化推送 `count` / `cell` / `stream`（只带新增文本）/ `output`（新增输出项）/ `outputs`（整体替换）/ `run`（终态）；断线自动重连，重连同样以快照重同步（事件带单调 `seq`，快照带 `lastEventSeq`，更小的事件丢弃）。刷新/重新进入页面**不会中断执行**，新页面会自动接管运行态——运行中继续显示「运行中」并接收实时输出，已结束则直接回填输出；运行中再次启动会得到 409（同一 Notebook 同一时刻只允许一个运行）。`GET /runs/current` 保留用于初载/终态取回完整结果。运行**不自动保存** Notebook，也不自动保存 Session；运行结束后点击「保存会话」才会写入 Session 快照。快照只保存运行输出与 `execution_count`，不保存源码、名称或结构；存在未保存的脚本修改时会阻止保存并提示先保存 Notebook。`.ipynb` 永远是纯脚本（`outputs=[]`、`execution_count=null`）；导入已有 Notebook 时原有输出会迁移为 `origin=import` 的 Session 快照，存量文件在首次读取/下载时也会把旧 outputs 迁为 `origin=legacy` 快照后清空脚本。下载 `.ipynb` 时，服务端会把最新快照中**源码哈希匹配**的输出挂载到导出的副本，不修改存储文件。编辑器与“提交整本 Notebook 训练”是两条独立路径：后者仍走执行队列、日志与产物。
+- 新建但尚未保存的 Notebook 首次运行单元格前会先保存纯脚本（用于创建 Notebook 与稳定 cell id）；**离开编辑器不再关闭内核会话**（后台运行需要继续、刷新后靠它恢复运行态与输出），会话由服务端按空闲回收（`TRAINHUB_KERNEL_SESSION_IDLE_SECONDS`，默认 30 分钟；同时最多 `TRAINHUB_MAX_KERNEL_SESSIONS` 个）。
+- 交互式内核会创建 `work/dataset` 与 `work/output`（注入 `WMG_DATASET_DIR` / `WMG_OUTPUT_DIR`）。工具栏选择数据集后，运行单元格/会话会把数据集文件挂载到 `work/dataset`（符号链接/复制，保留目录结构）；未选择时该目录为空。训练产物仍需通过训练任务或自行访问可读路径。
+- 「导入 .ipynb」保留为独立入口：选择文件、可选显示名称，导入后同样可以继续手动编辑。
 
 #### 提交训练
 
@@ -248,7 +278,7 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli set-status --id c_ab12cd34 --sta
 
 管理 API（需要 `X-Admin-Token: $TRAINHUB_ADMIN_TOKEN`）：
 
-- `POST /api/admin/customers`、`GET /api/admin/customers`
+- `POST /api/admin/customers`（可选 `token`：导入既有身份时指定访问令牌，须 `trh_` 开头且全局唯一）、`GET /api/admin/customers`
 - `POST /api/admin/customers/{id}/rotate-token`
 - `POST /api/admin/customers/{id}/status`
 - `DELETE /api/admin/customers/{id}`（同时删除该客户全部文件，不可恢复）
@@ -261,7 +291,7 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli set-status --id c_ab12cd34 --sta
 - `GET /api/admin/runs/{run_id}/logs/stream`（SSE：status/log/end）
 - `POST /api/admin/runs/{run_id}/cancel`
 - `GET /api/admin/executor/status`
-- `POST /api/admin/executions`（平台控制面推送的一次闭环执行）
+- `POST /api/admin/executions`（平台控制面推送的一次闭环执行；`customerId` 指定执行归属客户，缺省保留客户 `sys_platform`）
 
 令牌按需求**明文保存在数据表中**（`customers.token`）。管理 API 的客户列表会返回令牌明文，只应通过受控网络访问；一旦泄露立即 `rotate-token`。控制台不会在页面 URL 中携带令牌，所有请求走请求头。
 
@@ -305,8 +335,17 @@ data/customers/<customer>/runs/<run>/
 | `WMG_EXECUTION_ORIGIN` | 平台任务为 `platform`；客户任务不设置 |
 | `WMG_CONTROL_JOB_ID` | 平台控制面作业 ID（平台任务） |
 | `WMG_CODE_SHA256` / `WMG_DATASET_SHA256` / `WMG_ASSETS_SHA256` | 平台任务输入包摘要 |
-| `WMG_BASE_MODEL` | 平台任务声明的基座标识；由训练脚本自行加载/下载 |
+| `WMG_BASE_MODEL` | 平台任务声明的基座标识；训练脚本可用 `trainhub_runtime.ensure_model` 解析 |
 | `WMG_ASSETS_DIR` / `WMG_MODEL_DIR` / `WMG_BASELINE_MODEL_DIR` | 平台资产包目录；存在时注入 |
+| `WMG_MODEL_CACHE` | 服务级共享模型缓存根目录（所有会话/任务共用） |
+| `HF_HUB_CACHE` / `HF_XET_CACHE` | 指向共享缓存的 Hugging Face 缓存目录，避免每个会话重复下载 |
+| `PYTHONPATH` | 追加了 `trainhub_runtime` 助手包所在目录，Notebook 可直接 import |
+
+**Notebook 数据集选择**：编辑器工具栏的「数据集」选择会持久化在该 Notebook 上（`notebooks.dataset_id`）。
+运行单元格/启动会话时，选中的数据集文件会以符号链接（失败退化为复制）挂载到会话的
+`WMG_DATASET_DIR`，**目录结构原样保留**；切换数据集会整体替换该目录。运行中不能切换（接口返回 409），
+新选择在下次运行时生效。数据集本身支持整目录上传（自动去掉共同顶层目录），ZIP 可在数据集页一键解压成
+目录内容。训练任务提交表单里的数据集选择是独立的，按每次任务快照。
 
 ### 5.2 执行语义
 
@@ -394,6 +433,54 @@ Notebook 在 `OUTPUT_DIR` 写 `trainhub_result.json`：
 - 导入会生成模型运营的 `external.import` 作业、模型版本（stage=candidate）与一条 `mode=metrics` 评估；`run_id = trainhub-<训练任务 ID>`，重复导入幂等。
 - 产物会落到模型运营 artifacts，作为部署包与基线归档使用；训练任务的输出目录本身保持不变。
 
+### 5.6 共享模型缓存与 `trainhub_runtime`
+
+**基座模型是 TrainHub 的服务级基础资源，不属于某一次训练任务。** 所有 Notebook 会话与训练任务共用
+`TRAINHUB_MODEL_DIR`（默认 `$TRAINHUB_DATA_DIR/model-cache`）下的同一份缓存；Notebook 不要再自己拼缓存目录、
+选择下载策略或处理并发下载。
+
+平台向内核注入 `WMG_MODEL_CACHE`、`HF_HUB_CACHE`、`HF_XET_CACHE`，并把 `trainhub_runtime` 加进
+`PYTHONPATH`。Notebook 里只需要：
+
+```python
+from trainhub_runtime import ensure_model
+
+base_model_dir = ensure_model(
+    "startlux-models/StartLux-Decision-v1.1-0.8B-Instant-MLX-4bit",
+    required_files=["config.json"],
+)
+```
+
+- `ref` 也可以是本地目录（例如平台资产包里的 `WMG_MODEL_DIR`），此时直接校验并返回；
+- 命中缓存**不联网**；未命中才在仓库级文件锁内调用 `huggingface_hub.snapshot_download`，
+  多个内核/任务同时启动不会重复拉同一个基座；
+- `revision=` 固定分支/tag/commit（可复现训练建议显式指定）；`refresh=True` 重新校验远端；
+- `local_files_only=True` 或环境变量 `TRAINHUB_MODEL_OFFLINE=1` 时只读缓存，缺失立即报错（气隙节点）；
+- 调用时若进程里 `HF_HUB_CACHE` / `HF_XET_CACHE` 未设置，助手会把它们指到同一根——手工
+  `models pull`、本地调试等不经平台注入的进程也不会把 xet 分块缓存散落到各自的 `~/.cache`；
+- 下载进度、断点与文件去重都由 Hugging Face 负责，TrainHub 不再实现一套下载器。
+
+运维侧：
+
+```bash
+# 查看缓存占用（服务级只读接口：GET /api/admin/models；应用 venv 即可）
+PYTHONPATH=src .venv/bin/python -m trainhub.cli models list
+
+# 预热基座（可重复执行；已有缓存时不会重新下载）
+# pull 需要 huggingface_hub，请用训练环境解释器（生产为 trainer-venv，本机为 trainer-mlx-venv）
+PYTHONPATH=src /opt/trainhub/trainer-venv/bin/python -m trainhub.cli models pull org/model \
+  --revision main --required-file config.json
+```
+
+缓存目录可以直接备份或整体删除（删除后下次运行会重新下载）；它不是模型注册表，不表达模型版本线，
+模型版本仍由模型运营/实验平台管理。`TRAINHUB_MODEL_DIR` 直接就是 Hugging Face 的 `cache_dir`
+（目录内是 `models--org--name/...`）；如果节点上已有过去由 Notebook 自行 `snapshot_download(cache_dir=...)`
+下载的缓存，把它指向该目录即可复用，不需要搬文件或重新下载。
+
+> **安全边界**：共享模型缓存按"可信客户"场景设计（与数据集共享一致）。Notebook 内核继承 TrainHub
+> 服务进程的环境变量，如果服务 env 配了 `HF_TOKEN`，客户代码可以读取并使用它；仅管理员可见的 HF 凭据
+> 不要放进 TrainHub 服务 env。需要气隙/预置模型时，用节点侧 `models pull` 预下载并关闭 Notebook 的联网下载。
+
 ---
 
 ## 6. 平台侧集成（可选）
@@ -442,12 +529,12 @@ TrainHub 是**单任务实例**，只接受外部调度方推送任务，不主�
 
 1. 调度方调用 `POST /api/admin/executions`（multipart）提交一次闭环执行：
    - 文件：`code`（单个 `.ipynb` 或 zip，zip 内可带辅助模块）、`dataset`（可选 zip）、`assets`（可选 zip，评估场景的模型/基线目录）；
-   - 表单：`name`、`entry`（zip 内入口 notebook，默认第一个 `.ipynb`）、`kernel`、`parameters`（JSON 对象）、`timeoutSeconds`、`baseModel`、`controlJobId`；
+   - 表单：`name`、`entry`（zip 内入口 notebook，默认第一个 `.ipynb`）、`kernel`、`parameters`（JSON 对象）、`timeoutSeconds`、`baseModel`、`controlJobId`、`customerId`（执行归属客户：平台控制面传它配置的平台身份客户，客户用同一令牌登录控制台即可看到这次 API 发起的执行；缺省 `sys_platform`）；
    - 当前实例已有排队/运行任务时返回 `409`，不排队、不抢占。
 2. 调度方携带 `runId` 调用 `GET /api/admin/runs/{runId}/logs/stream`，以 **SSE** 接收 `status` / `log` / `end` 事件；任务不存在返回 `404`，已结束返回 `409`。
 3. 收到 `end` 后，调度方调用 `GET /api/admin/runs/{runId}` 查询结果、`GET /api/admin/runs/{runId}/outputs/download` 下载产物。
-4. TrainHub 自己管理任务生命周期、日志与产物，数据落在 `TRAINHUB_DATA_DIR/customers/sys_platform/runs/<runId>/`。
-5. 平台任务挂在保留客户 `sys_platform` 下，不出现在客户列表；`GET /api/admin/runs` 的 `origin` 字段区分 `customer` / `platform`。
+4. TrainHub 自己管理任务生命周期、日志与产物，数据落在 `TRAINHUB_DATA_DIR/customers/<归属客户>/runs/<runId>/`。
+5. 平台任务默认挂在保留客户 `sys_platform`（不出现在客户列表）；平台控制面配置了**平台身份客户**时（`customerId`），任务归属该普通客户，管理员用同一客户令牌登录控制台即可看到这些执行。`GET /api/admin/runs` 的 `origin` 字段区分 `customer` / `platform`。
 
 节点健康由控制面主动探测（默认每 60 秒）`GET /api/admin/executor/status`；TrainHub 不发送心跳、也不保存控制面地址。控制面任务与客户 Web UI 任务共用同一执行槽（`TRAINHUB_MAX_CONCURRENT_RUNS`，默认 1）。
 
@@ -455,7 +542,7 @@ TrainHub 是**单任务实例**，只接受外部调度方推送任务，不主�
 
 如果使用 WMG 平台，训练节点可以由控制面「部署下发」统一推送代码与配置：
 
-1. 节点前置：安装 docker + nvidia-container-toolkit，并准备训练镜像；训练依赖与 Jupyter kernel 由节点管理员预置。
+1. 节点前置：Linux 节点安装 Docker（GPU 另装 nvidia-container-toolkit），用 `deploy/build-sandbox-image.sh base|trainer|cuda` 构建沙箱镜像，并在 `.env` 设置 `TRAINHUB_SANDBOX=docker` 与 `TRAINHUB_SANDBOX_IMAGE`；macOS/MLX 节点保持 `TRAINHUB_SANDBOX=none`（Docker 无法运行 MLX）。
 2. 管理端配置：SSH 地址/端口/用户/私钥；「节点 API 地址 / API 令牌」需与节点侧 `TRAINHUB_ADMIN_TOKEN` 一致。
 3. 点击「部署下发」：控制面打包本机 `wmg-trainhub` 源码并 SFTP 上传，远端创建 `trainhub` 用户与 venv、安装依赖、更新源码与 `trainhub.service`、写入 `/etc/trainhub/trainhub.env`、重启服务并探测健康。
 4. 核对节点 API 地址；未配置 API 地址的节点不会被调度。建议用防火墙把 7470 限制为控制面/内网可达。
@@ -491,6 +578,72 @@ python3 -m venv .venv
 
 > kernelspec 指向的解释器必须能 `import ipykernel`。客户在提交任务时仍可从内核下拉框选择；服务端只校验显式指定的内核是否存在。
 
+**应用 venv 与训练 venv 分离**：`start.sh` 默认用 `.venv` 启动 TrainHub（只装 FastAPI/Jupyter 客户端），
+Notebook 内核由 kernelspec 指向训练 venv（MLX/CUDA/transformers）。TrainHub 只向内核注入共享模型缓存
+（`WMG_MODEL_CACHE` / `HF_HUB_CACHE` / `HF_XET_CACHE`）和 `trainhub_runtime` 助手，不修改内核环境本身。
+
+#### macOS / MLX 训练 venv
+
+MLX 节点的训练内核是**独立 venv**（不是 TrainHub 的 `.venv`），用 `deploy/macos-trainer-env.sh` 创建/更新：
+
+```bash
+# 以 TrainHub 服务用户执行（不要 sudo）；内核注册到该用户的 ~/Library/Jupyter/kernels
+deploy/macos-trainer-env.sh --dry-run      # 先看计划
+BASE_PYTHON=/opt/homebrew/bin/python3.11 deploy/macos-trainer-env.sh
+```
+
+- 干净 venv（不使用 `--system-site-packages`），依赖固定版本见 `deploy/trainer-requirements-macos.txt`
+  （mlx / mlx-vlm / transformers / huggingface_hub / ipykernel）；
+- `startlux-decide`：`/opt/trainhub/wheelhouse` 有 wheel 就用 wheel，否则钉 commit 从 git 安装；
+- 注册用户级内核 `wmg-mlx`（`KERNEL_NAME` 可改），提交训练时在 `kernel` 或 notebook metadata 里选它；
+- 安装结束做导入自检（`startlux_decide.prompt`、`mlx_vlm.trainer.peft`）并写 `requirements.lock`；
+- 升级版本：改 requirements 后重跑脚本；`--recreate` 可删除旧 venv 重建；
+- macOS 节点只能 `TRAINHUB_SANDBOX=none`，不要用 Docker 跑 MLX。
+
+#### Docker 沙箱（Linux）
+
+Linux 节点默认 `TRAINHUB_SANDBOX=docker`；macOS/MLX 节点默认且只能 `none`（显式 `docker` 会在启动时报错）。
+沙箱把每个交互式内核和每个训练任务放进**独立的短生命周期容器**，不再以服务用户身份直接跑 Notebook 代码：
+
+- **镜像**：`deploy/sandbox/Dockerfile`（CPU 最小内核；`trainer` 目标安装 `deploy/trainer-requirements.txt`）；
+  `deploy/sandbox/Dockerfile.cuda` 是基于 CUDA 的训练镜像示例。构建：
+
+  ```bash
+  deploy/build-sandbox-image.sh            # base
+  deploy/build-sandbox-image.sh trainer    # 含训练依赖
+  deploy/build-sandbox-image.sh cuda       # CUDA 示例
+  ```
+
+  构建后把同一镜像名写进 `.env` 的 `TRAINHUB_SANDBOX_IMAGE`。
+- **隔离参数**：`--user <服务uid:gid>`、`--read-only`、`--cap-drop ALL`、`--security-opt no-new-privileges`、
+  `--pids-limit`、`--memory`、`--cpus`、`--network none`（默认）、`--tmpfs /tmp`；不挂 Docker socket、
+  不挂宿主根目录、不传宿主环境变量。
+- **挂载**：会话 `work`（读写，含 `output`）、`home`（读写）、IPC 目录（读写）、选中数据集的存储目录（只读）、
+  共享模型缓存（默认只读）和仓库内 `runtime/` 助手（只读）。`.env`、SQLite、其他客户目录、代码仓库都不会出现。
+- **内核协议**：宿主与容器内核通过 Unix socket（IPC）通信，因此 `--network none` 不影响内核控制通道；
+  IPC 目录默认 `/var/tmp/trainhub-ipc`（要短，避免 Unix socket 路径上限），目录 0700。
+- **模型**：网络 `none` 时容器内 `HF_HUB_OFFLINE=1`；先在节点执行
+  `python -m trainhub.cli models pull ...`（训练 venv 解释器）预拉模型；共享模型缓存默认只读，避免一个
+  Notebook 污染其他租户的模型。**Notebook 的运行时依赖（pip 包）必须预装在镜像里**（`trainer` 镜像安装
+  `trainer-requirements.txt`；特殊依赖请扩展镜像），`--network none` 下不能临时 pip install/HF 下载。
+- **数据集**：挂载的是创建内核时选中的数据集；Docker 模式下切换数据集不会热改容器挂载，**下一次运行会重建内核**
+  （变量/导入状态丢失），本地 `none` 模式仍是热切换。
+- **内核选择**：沙箱镜像自带 Python 内核，UI/metadata 里的宿主 kernelspec 名称不再决定运行时；镜像里的
+  Python 由 `TRAINHUB_SANDBOX_PYTHON`（默认 `python3`）指定。
+- **预检**：启动时检查 Docker 守护进程与镜像、服务非 root、IPC 目录可写；不满足时执行接口返回 503，
+  **绝不回退到宿主执行**。`GET /api/admin/executor/status` 的 `sandbox` 字段回显模式、镜像与错误信息。
+- **清理**：容器带 `com.wmg.trainhub.sandbox=1` 标签；正常关闭即 `rm -f`，服务启动/停止时按标签清理遗留容器。
+- **GPU**：`TRAINHUB_SANDBOX_GPUS=all` 或 `device=0`；生产建议 MIG/按设备分配，避免单个 Notebook 占满 GPU。
+- **验证**：在 Linux 节点可用真实 Docker 跑内核集成测试：
+
+  ```bash
+  TRAINHUB_TEST_DOCKER_SANDBOX=1 \
+  TRAINHUB_SANDBOX_TEST_IMAGE=trainhub-sandbox:latest \
+  .venv/bin/python -m pytest -q tests/test_sandbox_docker.py
+  ```
+
+- **macOS/MLX**：不要把 MLX 训练指向 Docker；macOS 节点保持 `none`，并把它当作可信客户/专用设备部署。
+
 ### 7.2 环境变量与启动
 
 复制 `.env.example` 为 `.env`，按需修改。最少需要设置：
@@ -506,20 +659,34 @@ TRAINHUB_ADMIN_TOKEN=<openssl rand -hex 32>
 
 `deploy/trainhub.service` 提供了一个可直接修改的单元示例：独立 `trainhub` 用户、`EnvironmentFile`、单进程启动。**不要添加 `--workers`**：执行队列与任务去重都在进程内，多 worker 会各自拉取同一批排队任务。
 
+启用 Docker 沙箱时，rootful Docker 需要把 `trainhub` 用户加入 `docker` 组（单元文件里有 `SupplementaryGroups=docker` 注释行；docker 组等价 root 权限），或改用 rootless Docker；`docker.service` 已在单元依赖中声明。
+
 ### 7.4 反向代理与 TLS
 
 `deploy/nginx.conf.example` 是 nginx 示例（HTTPS 终止 + 反代到 7470）。访问令牌是长期凭据，请只通过 HTTPS 暴露；如直连端口，请用防火墙限制来源。
+
+#### 前端缓存与发布刷新
+
+TrainHub 是零构建 SPA，没有带构建哈希的资源文件名，因此静态资源不能使用长缓存：
+
+- `index.html`、`/assets/**/*.js`、`/assets/**/*.css` 由服务端发送 `Cache-Control: no-store, no-cache, must-revalidate`，浏览器每次加载都会重新获取。
+- 字体文件发送 `Cache-Control: no-cache`，保留条件请求（304），但不会长期使用旧字体。
+- 更新前端代码后，普通刷新页面即可拿到新版本；不需要重启 TrainHub（静态文件按请求从磁盘读取）。
+- 如果浏览器在**本次缓存策略上线前**已经缓存了旧的启发式资源，第一次可能需要 `Ctrl/Cmd + Shift + R` 强制刷新一次；之后由 `no-store` 接管。
+- 如果前置了 CDN/代理缓存，请对 `/assets/` 关闭缓存或改成带版本号的 URL；否则 CDN 可能先于浏览器返回旧文件。
 
 ### 7.5 磁盘布局与备份
 
 ```text
 $TRAINHUB_DATA_DIR/
-├── trainhub.db                  # SQLite（WAL：另有 -wal / -shm）
+├── trainhub.db                  # SQLite（含 notebook_sessions 运行快照；WAL：另有 -wal / -shm）
+├── model-cache/                 # 共享模型缓存（HF cache；所有 Notebook/训练任务共用）
 ├── executions/<run>/{code,dataset.zip}   # 平台控制面推送的本次输入（执行完回收）
+├── sessions/<customer>/<notebook>/<session>/{work,home,tmp}  # 交互式内核临时目录（关闭即删）
 └── customers/
     └── <customer>/
         ├── datasets/<dataset>/files/...
-        ├── notebooks/<notebook>/<name>.ipynb
+        ├── notebooks/<notebook>/<name>.ipynb   # 纯脚本；运行输出只在 Session 快照/导出副本中
         └── runs/<run>/{logs,output,environment.json,work,home,tmp}
 ```
 
@@ -544,6 +711,7 @@ $TRAINHUB_DATA_DIR/
 | 其他客户看不到共享数据集 | 所有者是否切换为共享；数据集是否被删除；是否有活动任务引用。 |
 | 管理 API 返回 503 | 节点是否配置 `TRAINHUB_ADMIN_TOKEN`；未配置时管理接口整体禁用。 |
 | 平台代理返回 502 | 平台侧 `TRAINHUB_ADMIN_TOKEN` 是否与节点一致；节点是否可达；TLS 证书/`TRAINHUB_VERIFY_TLS` 是否正确。 |
+| 更新前端后浏览器仍显示旧页面 | 先确认 `/assets/` 响应带 `no-store`；旧缓存首次用 `Ctrl/Cmd + Shift + R` 强制刷新；前置 CDN 是否缓存了 `/assets/`。 |
 
 ### 7.8 升级与迁移
 
@@ -572,7 +740,8 @@ $TRAINHUB_DATA_DIR/
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/datasets?page=&size=&q=` | 列表：自己的 + 其他客户共享的（含所有者信息） |
-| POST | `/api/datasets` | multipart：`files[]`、`name`、`description`、`shared`（可选） |
+| POST | `/api/datasets` | multipart：`files[]`（文件名可带相对路径）、`name`、`description`、`shared`（可选） |
+| POST | `/api/datasets/{id}/extract` | 把数据集中的 ZIP 解压为目录内容（仅所有者；活动任务引用时 409） |
 | GET | `/api/datasets/{id}` | 详情与文件列表（自己的或共享的） |
 | GET | `/api/datasets/{id}/download` | 单文件直出，多文件打包 ZIP（共享数据集同样可下载） |
 | PATCH | `/api/datasets/{id}/sharing` | 切换共享：`{"shared": true\|false}`（仅所有者） |
@@ -583,9 +752,18 @@ $TRAINHUB_DATA_DIR/
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/notebooks?page=&size=&q=` | 列表 |
-| POST | `/api/notebooks` | multipart：`file`（`.ipynb`）、`name` |
-| GET | `/api/notebooks/{id}` / `/download` | 详情 / 下载原文件 |
+| POST | `/api/notebooks` | JSON 手动新建：`{name?, content}`，`content` 是合法 `.ipynb` JSON 对象 |
+| POST | `/api/notebooks/import` | multipart 导入：`file`（`.ipynb`）、`name`（可选） |
+| GET | `/api/notebooks/{id}` | 详情 |
+| GET | `/api/notebooks/{id}/download` | 下载 `.ipynb`：纯脚本 + 最新且源码匹配的 Session 快照输出 |
+| GET | `/api/notebooks/{id}/content` | 可编辑的纯脚本 Notebook JSON（不含 `outputs` / `execution_count`） |
+| PUT | `/api/notebooks/{id}` | 保存脚本：`{name?, content}`；忽略并清空 outputs；有活动任务时 409 |
+| GET | `/api/notebooks/{id}/session` | 最新 Session 快照（含每 cell 的 `matchesScript`） |
+| PUT | `/api/notebooks/{id}/session` | 保存 Session 快照：`{cells:[{cellId, source, executionCount, outputs}]}`；不改脚本 |
 | GET | `/api/notebooks/{id}/last-run` | 该 Notebook 最近一次运行（提交训练时回填参数；没有则 `null`） |
+| POST | `/api/notebooks/{id}/sessions` | 启动/复用交互式内核：`{kernel?}` |
+| POST | `/api/notebooks/{id}/sessions/{session_id}/execute` | 执行单元格：`{code, cellId?, timeoutSeconds?}`，返回 `{status, executionCount, outputs, message}` |
+| DELETE | `/api/notebooks/{id}/sessions/{session_id}` | 关闭该 Notebook 的交互式内核 |
 | DELETE | `/api/notebooks/{id}` | 删除（有活动任务时 409） |
 
 ### 8.4 训练任务
@@ -608,6 +786,9 @@ $TRAINHUB_DATA_DIR/
 
 管理接口统一需要 `X-Admin-Token: $TRAINHUB_ADMIN_TOKEN`（或同值的 Bearer 令牌）。完整清单见 [4.3](#43-客户与令牌管理)。
 
+`GET /api/admin/models` 返回共享模型缓存概览（模型目录、总占用、各仓库大小与 refs），用于节点运维；
+它只读，不含下载/删除操作，预热与清理通过 `trainhub.cli models` 或文件系统完成。
+
 ---
 
 ## 9. 配置项
@@ -615,18 +796,35 @@ $TRAINHUB_DATA_DIR/
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `TRAINHUB_DATA_DIR` | `<项目目录>/data` | 数据根目录 |
+| `TRAINHUB_MODEL_DIR` | `$TRAINHUB_DATA_DIR/model-cache` | 共享模型缓存根目录（所有 Notebook/训练任务共用） |
 | `TRAINHUB_DB_PATH` | `$TRAINHUB_DATA_DIR/trainhub.db` | SQLite 文件 |
 | `TRAINHUB_ADMIN_TOKEN` | 空（禁用管理接口） | 管理令牌 |
 | `TRAINHUB_HOST` / `TRAINHUB_PORT` | `0.0.0.0` / `7470` | 监听地址 |
 | `TRAINHUB_MAX_CONCURRENT_RUNS` | `1` | 同时执行的任务数 |
 | `TRAINHUB_RUN_TIMEOUT_SECONDS` | `0` | 默认整体时限（0 不限） |
-| `TRAINHUB_CELL_TIMEOUT_SECONDS` | `0` | 单元格时限（0 不限） |
+| `TRAINHUB_CELL_TIMEOUT_SECONDS` | `0` | 训练任务单元格时限（0 不限） |
+| `TRAINHUB_MAX_KERNEL_SESSIONS` | `4` | 编辑器交互式内核并发会话上限 |
+| `TRAINHUB_KERNEL_SESSION_IDLE_SECONDS` | `1800` | 交互式内核空闲回收时间 |
+| `TRAINHUB_KERNEL_CELL_TIMEOUT_SECONDS` | `300` | 编辑器运行单元格的整体时限 |
 | `TRAINHUB_MAX_DATASET_MB` | `10240` | 单个数据集上传上限 |
-| `TRAINHUB_MAX_NOTEBOOK_MB` | `10` | Notebook 上传上限 |
+| `TRAINHUB_MAX_NOTEBOOK_MB` | `10` | Notebook 大小上限（导入/保存） |
 | `TRAINHUB_MAX_CODE_MB` | `200` | 平台推送代码包（.ipynb/.zip）上限 |
 | `TRAINHUB_MAX_ASSETS_MB` | `10240` | 平台推送资产包（模型/基线目录）上限 |
 | `TRAINHUB_MAX_LOG_MB` | `100` | 单任务日志上限 |
 | `TRAINHUB_KEEP_RUN_WORKDIR` | `false` | 结束后是否保留工作目录 |
+| `TRAINHUB_SANDBOX` | Linux `docker` / macOS `none` | 执行沙箱：`docker`（仅 Linux）或 `none`（同用户，可信环境） |
+| `TRAINHUB_SANDBOX_IMAGE` | `trainhub-sandbox:latest` | 沙箱镜像名（需先构建/拉取） |
+| `TRAINHUB_SANDBOX_DOCKER` | `docker` | Docker CLI 路径 |
+| `TRAINHUB_SANDBOX_NETWORK` | `none` | 容器网络；`none` 时 HF 离线，模型需预拉 |
+| `TRAINHUB_SANDBOX_MEMORY_MB` | `4096` | 每内核容器内存上限 |
+| `TRAINHUB_SANDBOX_CPUS` | `2` | 每内核容器 CPU 上限 |
+| `TRAINHUB_SANDBOX_PIDS_LIMIT` | `512` | 每内核容器 PID 上限 |
+| `TRAINHUB_SANDBOX_GPUS` | 空 | `all` / `device=0`；CUDA 镜像使用 |
+| `TRAINHUB_SANDBOX_RUN_AS` | 服务用户 `uid:gid` | 容器运行用户；uid 必须与服务用户一致；服务不能以 root 运行 |
+| `TRAINHUB_SANDBOX_IPC_DIR` | `/var/tmp/trainhub-ipc` | IPC 目录（要短，Unix socket 路径限制） |
+| `TRAINHUB_SANDBOX_MODEL_CACHE_RO` | `true` | 共享模型缓存是否只读挂载 |
+| `TRAINHUB_SANDBOX_PYTHON` | `python3` | 镜像内启动内核的 Python |
+| `TRAINHUB_KERNEL_ENV_ALLOW` | 空 | `none` 模式额外放行的宿主环境变量（逗号分隔） |
 | `TRAINHUB_LOG_LEVEL` | `info` | 进程日志级别 |
 
 ---
@@ -639,7 +837,7 @@ cd wmg-trainhub
 node scripts/check-frontend.mjs
 ```
 
-测试覆盖：鉴权、客户隔离、上传/下载、Notebook 执行、SSE、单任务限制、取消、超时、路径穿越、平台闭环执行、执行器状态、静态资源、`.env` 加载、数据集共享、训练指标、参数回填、环境快照。
+测试覆盖：鉴权、客户隔离、上传/下载、Notebook 手动新建与编辑、纯脚本存储与 Session 快照迁移/保存/导出挂载、交互式内核会话与单元格执行、Notebook 训练执行、SSE、单任务限制、取消、超时、路径穿越、平台闭环执行、执行器状态、静态资源、`.env` 加载、数据集共享、训练指标、参数回填、环境快照、Docker 沙箱参数/环境剥离/IPC 内核与清理。
 
 `tests/test_runs.py` 会启动真实 Jupyter 内核执行 Notebook（依赖 venv 中的 `ipykernel`）。
 
@@ -647,13 +845,14 @@ node scripts/check-frontend.mjs
 
 ## 11. 已知限制与后续方向
 
-- **执行隔离**：当前为同用户子进程；规划支持容器/namespace 隔离与每客户独立 UID。
-- **孤儿内核**：进程被强制杀死（SIGKILL/断电）时，运行中的 Jupyter 内核可能残留；正常停止或重启会清理。运维可用 `ps` 检查 `ipykernel_launcher`。
+- **执行隔离**：Linux 节点已提供 Docker 沙箱（每内核/每训练任务一个临时容器，默认 `--network none`、只读根、丢弃 capability、只挂会话目录/选中数据集/模型缓存）；macOS/MLX 节点只能 `none`，属于可信设备模型。剩余风险：Docker 守护进程权限等价 root（建议 rootless）、共享模型缓存只读但仍可能被读取、绑定目录没有磁盘配额、GPU 尚无显存感知调度。
+- **孤儿内核/容器**：正常停止或重启会清理；SIGKILL/断电时本地内核可能残留 `ipykernel_launcher`，Docker 容器会在下次启动时按标签清理。运维可用 `ps`/`docker ps --filter label=com.wmg.trainhub.sandbox=1` 检查。
 - **调度**：FIFO + 固定并发；没有优先级、抢占、GPU 显存感知调度或跨节点调度。
 - **配额与计量**：暂无每客户存储/算力配额与计费；只有上传大小与日志大小上限。
-- **版本线**：Notebook、数据集和平台代码包都没有版本语义；版本由客户或控制面自行管理。
+- **版本线**：Notebook、数据集和平台代码包都没有版本语义；Notebook 编辑是就地覆盖，没有历史版本或撤销，需要保留旧版本时请先下载或另存为新 Notebook。
 - **迁移**：启动时按内置清单补列，不是通用迁移框架；复杂升级前请备份。
 - **通知**：任务完成/失败暂无邮件或 Webhook 通知。
 - **指标**：只读尾部 4 MB、每系列最多 2000 点；没有指标归档、对比或 TensorBoard 集成。
 - **环境快照**：只记录服务环境与 kernelspec 标识，不采集内核实际 Python/依赖版本；需要完整复现时应在训练脚本中自行记录。
 - **平台集成**：TrainHub 不主动连接控制面，不做心跳、不保存控制面地址；节点健康由控制面主动探测。
+- **交互式内核**：每个 Notebook 一个会话，建模为临时工作目录；编辑器工具栏可选择数据集挂载到 `WMG_DATASET_DIR`，训练产物仍需通过训练任务生成。编辑器没有独立的 interrupt/restart 按钮（超时由服务端中断），离开编辑器或空闲超时会关闭会话。运行结果写回单元格后需要保存 Notebook 才持久化。

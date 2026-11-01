@@ -15,6 +15,7 @@ from ..services import (
     create_dataset,
     dataset_download,
     delete_dataset,
+    extract_dataset_archives,
     set_dataset_sharing,
 )
 from ..storage import Storage
@@ -63,6 +64,30 @@ async def upload_dataset(
         dataset_public(dataset, dataset_files, viewer_customer_id=customer["id"]),
         message="数据集已上传",
         code=201,
+    )
+
+
+@router.post("/{dataset_id}/extract")
+def extract_dataset(
+    request: Request,
+    dataset_id: str,
+    customer: dict = Depends(current_customer),
+    db: Database = Depends(get_db),
+    storage: Storage = Depends(get_storage),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    """把数据集里的 ZIP 解压成目录内容（仅所有者）。"""
+    dataset = extract_dataset_archives(
+        db=db,
+        storage=storage,
+        settings=settings,
+        customer=customer,
+        dataset_id=dataset_id,
+        ip=client_ip(request),
+    )
+    return ok(
+        dataset_public(dataset, viewer_customer_id=customer["id"]),
+        message="数据集已解压",
     )
 
 

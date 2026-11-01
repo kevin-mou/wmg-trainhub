@@ -101,8 +101,9 @@ export async function renderOverview(root, ctx) {
 
   function render(data, activity) {
     clearTimers();
-    const { stats, storage, recentRuns, activeRuns, customer } = data;
+    const { stats, storage, recentRuns, activeRuns, customer, executor } = data;
     const active = activeRuns && activeRuns.length ? activeRuns[0] : null;
+    const executorBusy = Boolean(executor && executor.busy);
     const successRate =
       stats.successRate == null ? "—" : `${Math.round(stats.successRate * 100)}%`;
 
@@ -133,7 +134,22 @@ export async function renderOverview(root, ctx) {
             )}</button>
           </div>
         </div>`
-      : `<div class="idle-band">
+      : executorBusy
+        ? `<div class="idle-band">
+          <div class="idle-icon">${icons.cpu}</div>
+          <div>
+            <div class="idle-title">${escapeHtml(
+              executor.platformActiveRuns > 0
+                ? t("overview.live.busyPlatformTitle")
+                : t("overview.live.busyTitle")
+            )}</div>
+            <div class="idle-text">${escapeHtml(t("overview.live.busyText"))}</div>
+          </div>
+          <button type="button" class="btn btn-secondary" disabled>${escapeHtml(
+            t("overview.actions.submitRun")
+          )}</button>
+        </div>`
+        : `<div class="idle-band">
           <div class="idle-icon">${icons.cpu}</div>
           <div>
             <div class="idle-title">${escapeHtml(t("overview.live.idleTitle"))}</div>
@@ -154,9 +170,9 @@ export async function renderOverview(root, ctx) {
           <button type="button" class="btn btn-secondary" id="ov-upload">${icons.upload}${escapeHtml(
             t("overview.actions.uploadDataset")
           )}</button>
-          <button type="button" class="btn btn-primary" id="ov-submit">${icons.runs}${escapeHtml(
-            t("overview.actions.submitRun")
-          )}</button>
+          <button type="button" class="btn btn-primary" id="ov-submit"${
+            executorBusy ? " disabled" : ""
+          }>${icons.runs}${escapeHtml(t("overview.actions.submitRun"))}</button>
         </div>
       </div>
 
@@ -305,7 +321,7 @@ export async function renderOverview(root, ctx) {
       tailTimer = setInterval(loadTail, 4000);
     }
 
-    if (stats.activeRuns > 0) {
+    if (stats.activeRuns > 0 || executorBusy) {
       refreshTimer = setInterval(load, 10000);
     }
   }

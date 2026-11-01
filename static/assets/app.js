@@ -6,6 +6,7 @@ import { renderActivity } from "./pages/activity.js";
 import { renderDatasets } from "./pages/datasets.js";
 import { renderLogin } from "./pages/login.js";
 import { renderNotebooks } from "./pages/notebooks.js";
+import { renderNotebookEditor } from "./pages/notebook-editor.js";
 import { renderOverview } from "./pages/overview.js";
 import { renderRunDetail } from "./pages/run-detail.js";
 import { renderRuns } from "./pages/runs.js";
@@ -23,6 +24,19 @@ const ROUTES = [
   { name: "overview", re: /^\/overview\/?$/, loader: renderOverview, label: "nav.overview" },
   { name: "datasets", re: /^\/datasets\/?$/, loader: renderDatasets, label: "nav.datasets" },
   { name: "notebooks", re: /^\/notebooks\/?$/, loader: renderNotebooks, label: "nav.notebooks" },
+  {
+    name: "notebook-new",
+    re: /^\/notebooks\/new\/?$/,
+    loader: renderNotebookEditor,
+    label: "nav.notebooks",
+  },
+  {
+    name: "notebook-edit",
+    re: /^\/notebooks\/([A-Za-z0-9_-]+)\/edit\/?$/,
+    loader: renderNotebookEditor,
+    label: "nav.notebooks",
+    param: "id",
+  },
   { name: "runs", re: /^\/runs\/?$/, loader: renderRuns, label: "nav.runs" },
   {
     name: "run-detail",
@@ -103,8 +117,14 @@ function cleanupPage() {
   }
 }
 
+function navNameForRoute(route) {
+  if (route.name === "run-detail") return "runs";
+  if (route.name.startsWith("notebook-")) return "notebooks";
+  return route.name;
+}
+
 function updateChrome(route) {
-  activeNavName = route.name === "run-detail" ? "runs" : route.name;
+  activeNavName = navNameForRoute(route);
   document.querySelectorAll("[data-nav]").forEach((item) => {
     item.classList.toggle("active", item.dataset.nav === activeNavName);
     if (item.dataset.nav === activeNavName) item.setAttribute("aria-current", "page");
@@ -171,7 +191,7 @@ async function handleRoute() {
 function renderShell() {
   const switchLabel = getLang() === "zh" ? "EN" : "中";
   const activeRoute = matchRoute(parseHash().path) || { name: "overview" };
-  activeNavName = activeRoute.name === "run-detail" ? "runs" : activeRoute.name;
+  activeNavName = navNameForRoute(activeRoute);
   const navHtml = NAV_ITEMS.map(
     (item) => `<a class="nav-item ${item.name === activeNavName ? "active" : ""}"
         href="#${item.path}" data-nav="${item.name}">

@@ -53,6 +53,11 @@ for name in ("torch", "transformers", "datasets", "peft", "ipykernel"):
 print("training imports ok")
 PY
 
+# 训练加速内核（flash-linear-attention / causal-conv1d）：可选，失败只影响速度
+echo "== 训练加速内核"
+sh "$APP/deploy/install-trainer-kernels.sh" \
+  || echo "WARN: 加速内核安装失败，训练将回退到较慢实现（日志：$LOGDIR/kernels.log）"
+
 # 让 Jupyter 的默认 python3 指向训练环境（TrainHub venv 内的 python3 kernelspec）
 DEFAULT_KERNEL_DIR="$APP/.venv/share/jupyter/kernels/python3"
 mkdir -p "$DEFAULT_KERNEL_DIR"

@@ -19,4 +19,4 @@ if [ ! -x "$PYTHON" ]; then
     PYTHON="python3"
 fi
 
-exec "$PYTHON" -m trainhub.cli serve --host "${TRAINHUB_HOST:-0.0.0.0}" --port "${TRAINHUB_PORT:-7470}"
+exec "$PYTHON" -m trainhub.cli serve --host "${TRAINHUB_HOST:-0.0.0.0}" --port "${TRAINHUB_PORT:-7470}" --reload

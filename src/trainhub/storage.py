@@ -34,6 +34,67 @@ def unique_filename(existing: set[str], name: str) -> str:
     return f"{stem} ({os.getpid()}){dot}{suffix}"
 
 
+def safe_relative_path(raw: str | None) -> str:
+    """把上传路径收敛为安全的相对路径（保留目录层级，规范化穿越段）。"""
+    cleaned = (raw or "file").replace("\\", "/").strip()
+    if cleaned.startswith("/") or not cleaned:
+        raise ApiError("非法文件路径", 400)
+    stack: list[str] = []
+    for part in cleaned.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if stack:
+                stack.pop()
+            continue
+        safe = "".join(ch for ch in part if ch >= " " and ch not in _ILLEGAL_NAME_CHARS)
+        safe = safe.strip().strip(".")
+        if not safe:
+            raise ApiError("非法文件路径", 400)
+        stack.append(safe[:180])
+    if not stack:
+        return "file"
+    path = "/".join(stack)
+    if len(path) > 800:
+        raise ApiError("文件路径过长", 400)
+    return path
+
+
+def unique_relative_path(existing: set[str], name: str) -> str:
+    """同名文件（含目录层级）追加序号，避免互相覆盖。"""
+    if name not in existing:
+        return name
+    parent, _, base = name.rpartition("/")
+    stem, dot, suffix = base.rpartition(".")
+    if not dot:
+        stem, suffix = base, ""
+    for index in range(1, 1000):
+        candidate = f"{stem} ({index}){dot}{suffix}"
+        full = f"{parent}/{candidate}" if parent else candidate
+        if full not in existing:
+            return full
+    candidate = f"{stem} ({os.getpid()}){dot}{suffix}"
+    return f"{parent}/{candidate}" if parent else candidate
+
+
+def strip_common_root(paths: list[str]) -> tuple[list[str], str | None]:
+    """整目录上传时去掉共同顶层目录，让内容直接挂载到数据集根目录。
+
+    例如 ``Dataset/train.jsonl`` + ``Dataset/test.jsonl`` → ``train.jsonl`` + ``test.jsonl``，
+    并返回 ``Dataset``（可作为未命名数据集的默认名称）。
+    """
+    if not paths:
+        return paths, None
+    first = paths[0].split("/")
+    if len(first) < 2:
+        return paths, None
+    root = first[0]
+    prefix = f"{root}/"
+    if all(path.startswith(prefix) for path in paths):
+        return [path[len(prefix) :] for path in paths], root
+    return paths, None
+
+
 def resolve_within(base: Path, relative: str) -> Path:
     """把相对路径安全地解析到 base 之内，拒绝穿越与绝对路径。"""
     cleaned = relative.replace("\\", "/").strip()
@@ -78,7 +139,15 @@ def build_zip(source_dir: Path, dest: Path) -> int:
     return count
 
 
-def extract_zip_safe(archive: Path, dest: Path, max_bytes: int) -> int:
+def extract_zip_safe(
+    archive: Path,
+    dest: Path,
+    max_bytes: int,
+    *,
+    label: str = "代码包",
+    max_files: int = 0,
+    overwrite: bool = False,
+) -> int:
     """解压 zip 到 dest：拒绝绝对路径/穿越/符号链接，并限制解压后总字节数。"""
     dest.mkdir(parents=True, exist_ok=True)
     dest_resolved = dest.resolve()
@@ -92,17 +161,27 @@ def extract_zip_safe(archive: Path, dest: Path, max_bytes: int) -> int:
                     continue
                 parts = [part for part in name.split("/") if part not in ("", ".")]
                 if not parts or any(part == ".." for part in parts):
-                    raise ApiError("代码包包含非法路径", 400)
+                    raise ApiError(f"{label}包含非法路径", 400)
                 # 外置属性高位是 Unix mode：0o120000 为符号链接，直接拒绝
                 mode = (info.external_attr >> 16) & 0o170000
                 if mode == 0o120000:
-                    raise ApiError("代码包不允许包含符号链接", 400)
+                    raise ApiError(f"{label}不允许包含符号链接", 400)
                 target = (dest_resolved / Path(*parts)).resolve()
                 if os.path.commonpath([str(dest_resolved), str(target)]) != str(dest_resolved):
-                    raise ApiError("代码包包含非法路径", 400)
+                    raise ApiError(f"{label}包含非法路径", 400)
+                count += 1
+                if max_files and count > max_files:
+                    raise ApiError(f"{label}解压后文件数超过上限（{max_files}）", 413)
                 total += int(info.file_size or 0)
                 if total > max_bytes:
-                    raise ApiError(f"代码包解压后超过上限（{max_bytes // (1 << 20)} MB）", 413)
+                    raise ApiError(f"{label}解压后超过上限（{max_bytes // (1 << 20)} MB）", 413)
+                if target.exists():
+                    if not overwrite:
+                        raise ApiError(f"{label}解压时目标文件已存在：{name}", 409)
+                    try:
+                        target.unlink()
+                    except OSError as exc:
+                        raise ApiError(f"{label}解压时无法覆盖文件：{name}", 409) from exc
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(info) as src, target.open("wb") as out:
                     while True:
@@ -110,9 +189,8 @@ def extract_zip_safe(archive: Path, dest: Path, max_bytes: int) -> int:
                         if not chunk:
                             break
                         out.write(chunk)
-                count += 1
     except zipfile.BadZipFile as exc:
-        raise ApiError("代码包不是合法的 zip", 400) from exc
+        raise ApiError(f"{label}不是合法的 zip", 400) from exc
     return count
 
 
@@ -145,6 +223,7 @@ class Storage:
         self.root = Path(data_dir).expanduser().resolve()
         self.customers_dir = self.root / "customers"
         self.jupyter_dir = self.root / "jupyter"
+        self.sessions_dir = self.root / "sessions"
         # 平台控制面推送的执行输入（代码包/数据集包）。与 run 工作目录分开，
         # 因为执行器开跑前会清空 run 目录；这些输入要保留到任务结束。
         self.executions_dir = self.root / "executions"
@@ -154,6 +233,7 @@ class Storage:
         self.customers_dir.mkdir(parents=True, exist_ok=True)
         self.jupyter_dir.mkdir(parents=True, exist_ok=True)
         self.executions_dir.mkdir(parents=True, exist_ok=True)
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
 
     # -- customers / resources
 
@@ -210,6 +290,10 @@ class Storage:
     def run_environment_path(self, customer_id: str, run_id: str) -> Path:
         """执行器在训练启动时写入的环境快照。"""
         return self.run_dir(customer_id, run_id) / "environment.json"
+
+    def notebook_session_dir(self, customer_id: str, notebook_id: str, session_id: str) -> Path:
+        """交互式 Notebook 内核会话的临时工作目录。"""
+        return self.sessions_dir / customer_id / notebook_id / session_id
 
     def run_home_dir(self, customer_id: str, run_id: str) -> Path:
         return self.run_dir(customer_id, run_id) / "home"

@@ -1,0 +1,10 @@
+# WMG TrainHub · macOS/MLX 训练内核依赖（干净 venv，固定版本）
+# 用法：deploy/macos-trainer-env.sh（只装训练 venv，不碰 TrainHub 应用 venv）
+#
+# 版本取自 2026-10-26 起实际跑通 MLX LoRA 的组合；升级时同步改这里并重跑脚本。
+# startlux-decide 不在此清单：由脚本从 wheelhouse 或钉 commit 的 git 源安装。
+mlx==0.32.4
+mlx-vlm==0.7.11
+transformers==5.17.0
+huggingface_hub==1.33.0
+ipykernel==7.4.0

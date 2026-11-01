@@ -15,8 +15,17 @@ from types import SimpleNamespace
 from typing import Any
 
 from .config import Settings
+from .dataset_mount import sync_dataset_mount
 from .db import Database
 from .environment import environment_snapshot
+from .runtime_env import (
+    RUNTIME_PACKAGE_ROOT,
+    host_base_env,
+    kernel_runtime_env,
+    sandbox_env,
+)
+from .sandbox import DockerSandbox, SandboxSpec
+from .sandbox_kernel import SandboxKernelManager
 from .kernels import list_kernels
 from .storage import Storage, extract_zip_safe, iter_files
 from .utils import truncate
@@ -193,10 +202,18 @@ def _format_exception(exc: BaseException) -> str:
 class RunExecutor:
     """单实例内的训练执行器：DB 队列 + 固定并发 worker。"""
 
-    def __init__(self, db: Database, settings: Settings, storage: Storage) -> None:
+    def __init__(
+        self,
+        db: Database,
+        settings: Settings,
+        storage: Storage,
+        *,
+        sandbox: DockerSandbox | None = None,
+    ) -> None:
         self._db = db
         self._settings = settings
         self._storage = storage
+        self._sandbox = sandbox or DockerSandbox(settings)
         self._queue: asyncio.Queue[str] | None = None
         self._workers: list[asyncio.Task] = []
         self._active_tasks: dict[str, asyncio.Task] = {}
@@ -425,6 +442,14 @@ class RunExecutor:
                     requested_kernel=kernel,
                     kernel_spec=kernel_spec,
                 )
+                if getattr(self._settings, "sandbox_mode", "none") == "docker":
+                    snapshot["sandbox"] = {
+                        "mode": "docker",
+                        "image": self._settings.sandbox_image,
+                        "network": self._settings.sandbox_network,
+                        "readOnlyRootfs": True,
+                        "capDrop": "ALL",
+                    }
                 temp_environment = environment_path.with_name(
                     f"{environment_path.name}.{os.getpid()}.tmp"
                 )
@@ -442,9 +467,46 @@ class RunExecutor:
             }
             # 未显式指定内核时不传 kernel_name，让 nbclient 使用 notebook
             # metadata 或 Jupyter 的默认内核（节点环境自行准备）。
-            if kernel:
+            if kernel and getattr(self._settings, "sandbox_mode", "none") != "docker":
                 client_kwargs["kernel_name"] = kernel
-            client = client_class(nb, **client_kwargs)
+            if getattr(self._settings, "sandbox_mode", "none") == "docker":
+                self._sandbox.ensure_available()
+                dataset_dirs: list[Path] = []
+                if not bundle_mode and run.get("dataset_id"):
+                    dataset = self._db.get_accessible_dataset(run["customer_id"], run["dataset_id"])
+                    if dataset is not None:
+                        dataset_dirs.append(
+                            self._storage.dataset_files_dir(dataset["customer_id"], dataset["id"])
+                        )
+                ipc_dir = self._sandbox.new_ipc_dir()
+                sandbox_environment = sandbox_env(
+                    self._settings,
+                    env,
+                    home_dir=home_dir,
+                    model_dir=self._settings.model_dir_path,
+                    network=self._settings.sandbox_network,
+                )
+                spec = SandboxSpec(
+                    name=self._sandbox.container_name("run", run_id),
+                    kind="run",
+                    key=run_id,
+                    customer_id=customer_id,
+                    work_dir=workdir,
+                    cwd=exec_cwd,
+                    output_dir=output_dir,
+                    home_dir=home_dir,
+                    ipc_dir=ipc_dir,
+                    env=sandbox_environment,
+                    dataset_dirs=dataset_dirs,
+                    logs_dir=log_path.parent,
+                    model_dir=self._settings.model_dir_path,
+                    runtime_dir=RUNTIME_PACKAGE_ROOT,
+                    python=getattr(self._settings, "sandbox_python", "python3"),
+                )
+                manager = SandboxKernelManager(sandbox=self._sandbox, spec=spec)
+                client = client_class(nb, km=manager, **client_kwargs)
+            else:
+                client = client_class(nb, **client_kwargs)
             self._active_clients[run_id] = client
 
             timeout_seconds = int(run.get("timeout_seconds") or 0)
@@ -584,27 +646,17 @@ class RunExecutor:
         if not dataset_id:
             return
         files = self._db.get_dataset_files(dataset_id)
-        linked = 0
-        for item in files:
-            source = Path(item["storage_path"])
-            if not source.is_file():
-                writer.line(f"警告：数据集文件缺失 {item['filename']}")
-                continue
-            destination = target / item["filename"]
-            try:
-                os.symlink(source, destination)
-            except OSError:
-                try:
-                    shutil.copy2(source, destination)
-                except OSError:
-                    writer.line(f"警告：无法挂载数据集文件 {item['filename']}")
-                    continue
-            linked += 1
+        linked, missing = sync_dataset_mount(files, target)
+        for name in missing:
+            writer.line(f"警告：数据集文件缺失或无法挂载 {name}")
         writer.line(f"数据集已挂载：{linked}/{len(files)} 个文件 → work/dataset")
 
     def _resolve_kernel(self, run: dict[str, Any]) -> str | None:
         """任务显式指定时校验；未指定则返回 None，交给 Jupyter 决定。"""
         requested = str(run.get("kernel") or "").strip()
+        if getattr(self._settings, "sandbox_mode", "none") == "docker":
+            # 沙箱镜像自带 Python 内核；宿主 kernelspec 只用于本机模式。
+            return requested or None
         if not requested:
             return None
         names = {item["name"] for item in list_kernels()}
@@ -633,7 +685,7 @@ class RunExecutor:
         tmp_dir: Path,
         metrics_path: Path,
     ) -> dict[str, str]:
-        env = os.environ.copy()
+        env = host_base_env(self._settings)
         parameters = run.get("parameters") or "{}"
         env.update(
             {
@@ -678,20 +730,26 @@ class RunExecutor:
                     env["WMG_MODEL_DIR"] = str(assets_dir / "model")
                 if (assets_dir / "baseline").is_dir():
                     env["WMG_BASELINE_MODEL_DIR"] = str(assets_dir / "baseline")
+        # 共享模型缓存 + 运行时助手：交互式内核与整本训练运行使用同一份缓存。
+        env.update(kernel_runtime_env(self._settings, env))
         return env
 
     async def _shutdown_client(self, client: Any) -> None:
         if client is None:
             return
-        try:
-            from jupyter_core.utils import ensure_async
+        from jupyter_core.utils import ensure_async
 
-            manager = getattr(client, "km", None)
-            if manager is not None and await ensure_async(manager.is_alive()):
-                await ensure_async(manager.shutdown_kernel(now=True))
-                await ensure_async(manager.cleanup_resources())
+        manager = getattr(client, "km", None)
+        if manager is None:
+            return
+        try:
+            await ensure_async(manager.shutdown_kernel(now=True))
         except Exception:
-            logger.debug("清理训练内核失败", exc_info=True)
+            logger.debug("关闭训练内核失败", exc_info=True)
+        try:
+            await ensure_async(manager.cleanup_resources())
+        except Exception:
+            logger.debug("清理训练内核资源失败", exc_info=True)
 
 
 def scan_outputs(output_dir: Path) -> dict[str, Any]:

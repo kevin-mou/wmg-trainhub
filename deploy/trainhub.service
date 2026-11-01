@@ -7,6 +7,9 @@ Wants=docker.service
 Type=simple
 User=trainhub
 Group=trainhub
+# Docker 沙箱（rootful Docker）需要访问 /var/run/docker.sock；使用 rootful Docker 时
+# 取消下一行注释（docker 组等价于 root 权限，务必限制 7470 的访问来源）。
+# SupplementaryGroups=docker
 WorkingDirectory=/opt/trainhub/wmg-trainhub
 Environment=PYTHONPATH=/opt/trainhub/wmg-trainhub/src
 EnvironmentFile=-/etc/trainhub/trainhub.env

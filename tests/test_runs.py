@@ -220,7 +220,7 @@ async def test_shipped_example_notebook_runs(client, headers):
 
     example = Path(__file__).resolve().parents[1] / "examples" / "hello_trainhub.ipynb"
     uploaded = await client.post(
-        "/api/notebooks",
+        "/api/notebooks/import",
         headers=headers,
         data={"name": "hello example"},
         files=[("file", ("hello_trainhub.ipynb", example.read_bytes(), "application/json"))],

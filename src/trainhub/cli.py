@@ -5,6 +5,8 @@ import sys
 
 from .config import PROJECT_ROOT, Settings
 from .db import Database
+from .model_cache import model_cache_summary
+from .runtime_env import RUNTIME_PACKAGE_ROOT, ensure_model_dirs
 from .storage import Storage
 from .utils import new_customer_token
 
@@ -41,11 +43,68 @@ def cmd_init(args: argparse.Namespace) -> int:
     settings = Settings.from_env()
     storage = Storage(settings.data_dir)
     storage.ensure_base_dirs()
+    model_dir = ensure_model_dirs(settings)
     db = _open_database(settings)
     db.close()
     print(f"数据目录：{storage.root}")
     print(f"数据库：{settings.db_path}")
+    print(f"共享模型缓存：{model_dir}")
     print("初始化完成")
+    return 0
+
+
+def _human_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{size} B"
+
+
+def cmd_models_list(args: argparse.Namespace) -> int:
+    settings = Settings.from_env()
+    summary = model_cache_summary(settings)
+    print(f"模型目录：{summary['modelDir']}（共 {_human_size(summary['totalBytes'])}）")
+    if not summary["models"]:
+        print("缓存为空；可用 `python -m trainhub.cli models pull <org/model>` 预下载。")
+        return 0
+    for item in summary["models"]:
+        refs = ",".join(item["refs"]) or "-"
+        print(
+            f"{_human_size(item['sizeBytes']):>10}  {item['repoId']:<64}  "
+            f"refs={refs:<10}  更新={item['updatedAt']}"
+        )
+    return 0
+
+
+def cmd_models_pull(args: argparse.Namespace) -> int:
+    settings = Settings.from_env()
+    ensure_model_dirs(settings)
+    runtime_path = str(RUNTIME_PACKAGE_ROOT)
+    if runtime_path not in sys.path:
+        sys.path.insert(0, runtime_path)
+    from trainhub_runtime import ensure_model
+
+    try:
+        path = ensure_model(
+            args.repo,
+            revision=args.revision,
+            cache_root=settings.model_dir_path,
+            required_files=args.required_file,
+            local_files_only=args.offline,
+            refresh=args.refresh,
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name == "huggingface_hub":
+            print(
+                "当前解释器没有 huggingface_hub；请用训练环境解释器运行，例如 "
+                "/opt/trainhub/trainer-venv/bin/python -m trainhub.cli models pull ...",
+                file=sys.stderr,
+            )
+            return 1
+        raise
+    print(path)
     return 0
 
 
@@ -138,6 +197,26 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--id", dest="customer_id", required=True)
     status.add_argument("--status", choices=["active", "disabled"], required=True)
     status.set_defaults(func=cmd_set_status)
+
+    models = sub.add_parser("models", help="共享模型缓存（服务级基础资源）")
+    models_sub = models.add_subparsers(dest="models_command", required=True)
+    models_list = models_sub.add_parser("list", help="列出已缓存模型与占用")
+    models_list.set_defaults(func=cmd_models_list)
+    models_pull = models_sub.add_parser("pull", help="把模型预下载到共享缓存")
+    models_pull.add_argument("repo", help="Hugging Face 仓库 ID，如 org/model")
+    models_pull.add_argument("--revision", default=None, help="分支 / tag / commit")
+    models_pull.add_argument(
+        "--required-file",
+        action="append",
+        dest="required_file",
+        default=None,
+        help="下载后必须存在的文件（可重复，如 --required-file config.json）",
+    )
+    models_pull.add_argument("--offline", action="store_true", help="只查缓存，不联网")
+    models_pull.add_argument(
+        "--refresh", action="store_true", help="跳过缓存命中判断，重新校验远端"
+    )
+    models_pull.set_defaults(func=cmd_models_pull)
     return parser
 
 

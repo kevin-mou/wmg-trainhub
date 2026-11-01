@@ -1,0 +1,37 @@
+# TrainHub Notebook 沙箱镜像（Linux / NVIDIA CUDA，示例）。
+#
+# 使用前先安装 NVIDIA Container Toolkit，并确认：
+#   docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+#
+# 构建：
+#   docker build -f deploy/sandbox/Dockerfile.cuda -t trainhub-sandbox:cuda .
+#
+# 启动 TrainHub 时设置 TRAINHUB_SANDBOX_GPUS=all 或 device=0。
+# 生产环境建议用 MIG 或按设备分配，避免一个 Notebook 占用全部 GPU。
+
+FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
+
+ARG SANDBOX_UID=1000
+ARG SANDBOX_GID=1000
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN groupadd -g "${SANDBOX_GID}" sandbox \
+    && useradd --create-home --uid "${SANDBOX_UID}" --gid "${SANDBOX_GID}" sandbox
+
+RUN python -m pip install --no-cache-dir \
+    "ipykernel>=6.25" \
+    "huggingface_hub>=0.23" \
+    "filelock>=3.12"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential git \
+    && rm -rf /var/lib/apt/lists/*
+COPY deploy/trainer-requirements.txt /tmp/trainer-requirements.txt
+RUN python -m pip install --no-cache-dir -r /tmp/trainer-requirements.txt
+
+USER sandbox
+WORKDIR /tmp
+CMD ["python3", "-m", "ipykernel_launcher", "--help"]

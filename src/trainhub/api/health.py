@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from ..config import Settings
-from ..kernels import default_kernel_name, jupyter_available, list_kernels
+from ..kernels import effective_default_kernel, effective_kernels, jupyter_available
 from ..responses import ok
 from .deps import current_customer, get_settings
 
@@ -20,12 +20,12 @@ def healthz() -> dict:
 def health(
     customer: dict = Depends(current_customer), settings: Settings = Depends(get_settings)
 ) -> dict:
-    kernels = list_kernels()
+    kernels = effective_kernels(settings)
     return ok(
         {
             "status": "ok",
             "jupyterAvailable": jupyter_available(),
             "kernelCount": len(kernels),
-            "defaultKernel": default_kernel_name(),
+            "defaultKernel": effective_default_kernel(settings),
         }
     )

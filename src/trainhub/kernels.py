@@ -57,3 +57,22 @@ def default_kernel_name() -> str | None:
     if not names:
         return None
     return FALLBACK_KERNEL_NAME if FALLBACK_KERNEL_NAME in names else names[0]
+
+
+def effective_kernels(settings: Settings) -> list[dict[str, str]]:
+    """UI/API 展示的内核：Docker 沙箱只提供镜像自带的 Python 内核。"""
+    if getattr(settings, "sandbox_mode", "none") == "docker":
+        return [
+            {
+                "name": FALLBACK_KERNEL_NAME,
+                "displayName": "Python 3 (Docker Sandbox)",
+                "language": "python",
+            }
+        ]
+    return list_kernels()
+
+
+def effective_default_kernel(settings: Settings) -> str | None:
+    if getattr(settings, "sandbox_mode", "none") == "docker":
+        return FALLBACK_KERNEL_NAME
+    return default_kernel_name()

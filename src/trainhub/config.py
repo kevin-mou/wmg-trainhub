@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,19 @@ def _bool_env(name: str, default: bool = False) -> bool:
     if raw is None or raw.strip() == "":
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _float_env(name: str, default: float, minimum: float = 0.0) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} 必须是数字，当前值：{raw!r}") from exc
+    if value < minimum:
+        raise RuntimeError(f"{name} 不能小于 {minimum}，当前值：{value}")
+    return value
 
 
 def _load_dotenv(path: Path) -> None:
@@ -73,6 +87,30 @@ class Settings:
     max_log_mb: int
     keep_run_workdir: bool
     log_level: str
+    kernel_session_idle_seconds: int = 1800
+    kernel_cell_timeout_seconds: int = 300
+    max_kernel_sessions: int = 4
+    # 共享模型缓存根目录；为空时使用 data_dir/model-cache（所有 Notebook / 训练任务共用）
+    model_dir: Path | None = None
+    # Docker 沙箱：Linux 节点默认启用；macOS/MLX 节点只能 none（MLX 无法在 Linux 容器中运行）
+    sandbox_mode: str = "none"
+    sandbox_image: str = "trainhub-sandbox:latest"
+    sandbox_docker_bin: str = "docker"
+    sandbox_network: str = "none"
+    sandbox_memory_mb: int = 4096
+    sandbox_cpus: float = 2.0
+    sandbox_pids_limit: int = 512
+    sandbox_gpus: str = ""
+    sandbox_run_as: str = ""
+    sandbox_ipc_dir: Path | None = None
+    sandbox_model_cache_ro: bool = True
+    sandbox_python: str = "python3"
+    # 本机内核额外放行的环境变量（逗号分隔）；默认只继承非敏感白名单
+    kernel_env_allow: str = ""
+
+    @property
+    def model_dir_path(self) -> Path:
+        return self.model_dir or (self.data_dir / "model-cache")
 
     @property
     def max_dataset_bytes(self) -> int:
@@ -102,6 +140,28 @@ class Settings:
             os.environ.get("TRAINHUB_DB_PATH") or (data_dir / "trainhub.db")
         ).expanduser()
         admin_token = (os.environ.get("TRAINHUB_ADMIN_TOKEN") or "").strip() or None
+        raw_model_dir = (os.environ.get("TRAINHUB_MODEL_DIR") or "").strip()
+        model_dir = None
+        if raw_model_dir:
+            candidate = Path(raw_model_dir).expanduser()
+            model_dir = candidate if candidate.is_absolute() else data_dir / candidate
+        sandbox_mode = (
+            (
+                os.environ.get("TRAINHUB_SANDBOX")
+                or ("docker" if sys.platform.startswith("linux") else "none")
+            )
+            .strip()
+            .lower()
+        )
+        if sandbox_mode not in {"none", "docker"}:
+            raise RuntimeError(f"TRAINHUB_SANDBOX 只支持 none/docker，当前值：{sandbox_mode!r}")
+        if sandbox_mode == "docker" and not sys.platform.startswith("linux"):
+            raise RuntimeError(
+                "Docker 沙箱仅支持 Linux 节点；macOS/MLX 无法在 Docker 中运行，"
+                "请设置 TRAINHUB_SANDBOX=none 或使用专用 macOS 节点"
+            )
+        raw_ipc_dir = (os.environ.get("TRAINHUB_SANDBOX_IPC_DIR") or "").strip()
+        sandbox_ipc_dir = Path(raw_ipc_dir).expanduser() if raw_ipc_dir else None
         return cls(
             data_dir=data_dir,
             db_path=db_path,
@@ -118,4 +178,25 @@ class Settings:
             max_log_mb=_int_env("TRAINHUB_MAX_LOG_MB", 100),
             keep_run_workdir=_bool_env("TRAINHUB_KEEP_RUN_WORKDIR", False),
             log_level=os.environ.get("TRAINHUB_LOG_LEVEL", "info").lower(),
+            kernel_session_idle_seconds=_int_env(
+                "TRAINHUB_KERNEL_SESSION_IDLE_SECONDS", 1800, minimum=60
+            ),
+            kernel_cell_timeout_seconds=_int_env(
+                "TRAINHUB_KERNEL_CELL_TIMEOUT_SECONDS", 300, minimum=1
+            ),
+            max_kernel_sessions=_int_env("TRAINHUB_MAX_KERNEL_SESSIONS", 4, minimum=1),
+            model_dir=model_dir,
+            sandbox_mode=sandbox_mode,
+            sandbox_image=os.environ.get("TRAINHUB_SANDBOX_IMAGE", "trainhub-sandbox:latest"),
+            sandbox_docker_bin=os.environ.get("TRAINHUB_SANDBOX_DOCKER", "docker"),
+            sandbox_network=os.environ.get("TRAINHUB_SANDBOX_NETWORK", "none"),
+            sandbox_memory_mb=_int_env("TRAINHUB_SANDBOX_MEMORY_MB", 4096, minimum=128),
+            sandbox_cpus=_float_env("TRAINHUB_SANDBOX_CPUS", 2.0, minimum=0.1),
+            sandbox_pids_limit=_int_env("TRAINHUB_SANDBOX_PIDS_LIMIT", 512, minimum=16),
+            sandbox_gpus=(os.environ.get("TRAINHUB_SANDBOX_GPUS") or "").strip(),
+            sandbox_run_as=(os.environ.get("TRAINHUB_SANDBOX_RUN_AS") or "").strip(),
+            sandbox_ipc_dir=sandbox_ipc_dir,
+            sandbox_model_cache_ro=_bool_env("TRAINHUB_SANDBOX_MODEL_CACHE_RO", True),
+            sandbox_python=(os.environ.get("TRAINHUB_SANDBOX_PYTHON") or "python3").strip(),
+            kernel_env_allow=(os.environ.get("TRAINHUB_KERNEL_ENV_ALLOW") or "").strip(),
         )

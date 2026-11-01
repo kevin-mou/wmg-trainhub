@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 
 from ..config import Settings
 from ..db import Database
-from ..kernels import default_kernel_name, jupyter_available, list_kernels
+from ..kernels import effective_default_kernel, effective_kernels, jupyter_available
 from ..responses import ok
 from ..serializers import customer_public, run_public
 from ..storage import Storage
@@ -30,8 +30,15 @@ def overview(
     customer: dict = Depends(current_customer),
     db: Database = Depends(get_db),
     storage: Storage = Depends(get_storage),
+    settings: Settings = Depends(get_settings),
 ) -> dict:
     counts = db.run_status_counts(customer["id"])
+    # 单任务实例：GPU 全局独占。平台任务（sys_platform）与其它客户的任务同样占位，
+    # 客户侧不能只看自己的队列，否则会把"被平台任务占用"误判成 GPU 空闲。
+    global_counts = db.global_run_status_counts()
+    global_active = global_counts.get("queued", 0) + global_counts.get("running", 0)
+    limit = max(1, int(settings.max_concurrent_runs or 1))
+    platform_active = db.count_active_runs(customer_id=Database.SYSTEM_CUSTOMER_ID)
     datasets_total = db.list_datasets(customer["id"], 1, 1, include_shared=False)[1]
     notebooks_total = db.list_notebooks(customer["id"], 1, 1)[1]
     succeeded = counts.get("succeeded", 0)
@@ -51,6 +58,12 @@ def overview(
     return ok(
         {
             "customer": profile,
+            "executor": {
+                "maxConcurrentRuns": limit,
+                "activeRuns": global_active,
+                "busy": global_active >= limit,
+                "platformActiveRuns": platform_active,
+            },
             "stats": {
                 "datasets": datasets_total,
                 "notebooks": notebooks_total,
@@ -77,11 +90,11 @@ def overview(
 def kernels(
     customer: dict = Depends(current_customer), settings: Settings = Depends(get_settings)
 ) -> dict:
-    available = list_kernels()
+    available = effective_kernels(settings)
     return ok(
         {
             "kernels": available,
-            "default": default_kernel_name(),
+            "default": effective_default_kernel(settings),
             "jupyterAvailable": jupyter_available(),
         }
     )

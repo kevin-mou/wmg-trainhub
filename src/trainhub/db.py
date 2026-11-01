@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import secrets
 import sqlite3
 import threading
@@ -51,10 +52,19 @@ CREATE TABLE IF NOT EXISTS notebooks (
     size_bytes INTEGER NOT NULL DEFAULT 0,
     cell_count INTEGER NOT NULL DEFAULT 0,
     storage_path TEXT NOT NULL,
+    dataset_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_notebooks_customer ON notebooks(customer_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS notebook_sessions (
+    notebook_id TEXT PRIMARY KEY REFERENCES notebooks(id) ON DELETE CASCADE,
+    customer_id TEXT NOT NULL,
+    origin TEXT NOT NULL DEFAULT 'session',
+    cells_json TEXT NOT NULL,
+    saved_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY,
@@ -148,6 +158,7 @@ class Database:
             ("runs", "dataset_owner_id", "TEXT"),
             ("runs", "dataset_owner_name", "TEXT"),
             ("datasets", "visibility", "TEXT NOT NULL DEFAULT 'private'"),
+            ("notebooks", "dataset_id", "TEXT"),
         ):
             try:
                 self._execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
@@ -315,7 +326,9 @@ class Database:
     def get_accessible_dataset(self, customer_id: str, dataset_id: str) -> dict[str, Any] | None:
         """当前客户可见的数据集：自己的，或任何客户共享出来的。"""
         return self._query_one(
-            "SELECT d.*, c.name AS owner_name "
+            "SELECT d.*, c.name AS owner_name, "
+            "EXISTS(SELECT 1 FROM dataset_files f WHERE f.dataset_id = d.id "
+            "AND lower(f.filename) LIKE '%.zip') AS has_zip "
             "FROM datasets d JOIN customers c ON c.id = d.customer_id "
             "WHERE d.id = ? AND (d.customer_id = ? OR d.visibility = 'shared')",
             (dataset_id, customer_id),
@@ -330,6 +343,9 @@ class Database:
         )
         if cursor.rowcount != 1:
             return None
+        if visibility != "shared":
+            # 取消共享后，其他客户 Notebook 上的选择不再可用，直接清除引用。
+            self.clear_notebook_dataset_references(dataset_id, keep_customer_id=customer_id)
         return self.get_accessible_dataset(customer_id, dataset_id)
 
     def get_dataset_files(self, dataset_id: str) -> list[dict[str, Any]]:
@@ -337,6 +353,28 @@ class Database:
             "SELECT * FROM dataset_files WHERE dataset_id = ? ORDER BY filename",
             (dataset_id,),
         )
+
+    def replace_dataset_files(
+        self,
+        dataset_id: str,
+        files: Iterable[tuple[str, int, str]],
+        *,
+        size_bytes: int,
+        file_count: int,
+    ) -> None:
+        """整体替换数据集文件清单（解压 ZIP 后重算大小/数量）。"""
+        with self._lock:
+            self._conn.execute("DELETE FROM dataset_files WHERE dataset_id = ?", (dataset_id,))
+            self._conn.executemany(
+                "INSERT INTO dataset_files (dataset_id, filename, size_bytes, storage_path) "
+                "VALUES (?, ?, ?, ?)",
+                [(dataset_id, filename, size, path) for filename, size, path in files],
+            )
+            self._conn.execute(
+                "UPDATE datasets SET size_bytes = ?, file_count = ? WHERE id = ?",
+                (size_bytes, file_count, dataset_id),
+            )
+            self._conn.commit()
 
     def list_datasets(
         self,
@@ -365,7 +403,10 @@ class Database:
         )
         total = int(total_row["n"]) if total_row else 0
         rows = self._query(
-            "SELECT d.*, c.name AS owner_name FROM datasets d "
+            "SELECT d.*, c.name AS owner_name, "
+            "EXISTS(SELECT 1 FROM dataset_files f WHERE f.dataset_id = d.id "
+            "AND lower(f.filename) LIKE '%.zip') AS has_zip "
+            "FROM datasets d "
             "JOIN customers c ON c.id = d.customer_id "
             f"WHERE {clause} "
             "ORDER BY (d.customer_id = ?) DESC, d.created_at DESC, d.id DESC "
@@ -378,10 +419,27 @@ class Database:
         dataset = self.get_dataset(customer_id, dataset_id)
         if dataset is None:
             return None
+        self.clear_notebook_dataset_references(dataset_id)
         self._execute(
             "DELETE FROM datasets WHERE id = ? AND customer_id = ?", (dataset_id, customer_id)
         )
         return dataset
+
+    def clear_notebook_dataset_references(
+        self, dataset_id: str, *, keep_customer_id: str | None = None
+    ) -> None:
+        """数据集删除/取消共享时清理 Notebook 选择，避免悬空引用。"""
+        if keep_customer_id:
+            self._execute(
+                "UPDATE notebooks SET dataset_id = NULL "
+                "WHERE dataset_id = ? AND customer_id != ?",
+                (dataset_id, keep_customer_id),
+            )
+        else:
+            self._execute(
+                "UPDATE notebooks SET dataset_id = NULL WHERE dataset_id = ?",
+                (dataset_id,),
+            )
 
     # ------------------------------------------------------------------ notebooks
 
@@ -415,6 +473,45 @@ class Database:
             ),
         )
         return self.get_notebook(customer_id, notebook_id)  # type: ignore[return-value]
+
+    def update_notebook(
+        self,
+        customer_id: str,
+        notebook_id: str,
+        *,
+        name: str,
+        filename: str,
+        size_bytes: int,
+        cell_count: int,
+        storage_path: str,
+    ) -> dict[str, Any] | None:
+        self._execute(
+            "UPDATE notebooks SET name = ?, filename = ?, size_bytes = ?, "
+            "cell_count = ?, storage_path = ?, updated_at = ? "
+            "WHERE id = ? AND customer_id = ?",
+            (
+                name,
+                filename,
+                size_bytes,
+                cell_count,
+                storage_path,
+                utc_now(),
+                notebook_id,
+                customer_id,
+            ),
+        )
+        return self.get_notebook(customer_id, notebook_id)
+
+    def set_notebook_dataset(
+        self, customer_id: str, notebook_id: str, dataset_id: str | None
+    ) -> dict[str, Any] | None:
+        cursor = self._execute(
+            "UPDATE notebooks SET dataset_id = ? WHERE id = ? AND customer_id = ?",
+            (dataset_id, notebook_id, customer_id),
+        )
+        if cursor.rowcount != 1:
+            return None
+        return self.get_notebook(customer_id, notebook_id)
 
     def get_notebook(self, customer_id: str, notebook_id: str) -> dict[str, Any] | None:
         return self._query_one(
@@ -454,6 +551,60 @@ class Database:
             "DELETE FROM notebooks WHERE id = ? AND customer_id = ?", (notebook_id, customer_id)
         )
         return notebook
+
+    # ------------------------------------------------------------ notebook sessions
+
+    def get_notebook_session(self, customer_id: str, notebook_id: str) -> dict[str, Any] | None:
+        row = self._query_one(
+            "SELECT * FROM notebook_sessions WHERE notebook_id = ? AND customer_id = ?",
+            (notebook_id, customer_id),
+        )
+        if row is None:
+            return None
+        try:
+            cells = json.loads(row.pop("cells_json"))
+        except (TypeError, ValueError):
+            cells = []
+        row["cells"] = cells if isinstance(cells, list) else []
+        return row
+
+    def upsert_notebook_session(
+        self,
+        customer_id: str,
+        notebook_id: str,
+        *,
+        origin: str,
+        cells: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        now = utc_now()
+        self._execute(
+            "INSERT INTO notebook_sessions "
+            "(notebook_id, customer_id, origin, cells_json, saved_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(notebook_id) DO UPDATE SET "
+            "customer_id = excluded.customer_id, origin = excluded.origin, "
+            "cells_json = excluded.cells_json, saved_at = excluded.saved_at",
+            (
+                notebook_id,
+                customer_id,
+                origin,
+                json.dumps(cells, ensure_ascii=False),
+                now,
+            ),
+        )
+        return self.get_notebook_session(customer_id, notebook_id)  # type: ignore[return-value]
+
+    def delete_notebook_session(self, customer_id: str, notebook_id: str) -> None:
+        self._execute(
+            "DELETE FROM notebook_sessions WHERE notebook_id = ? AND customer_id = ?",
+            (notebook_id, customer_id),
+        )
+
+    def set_notebook_size(self, customer_id: str, notebook_id: str, size_bytes: int) -> None:
+        self._execute(
+            "UPDATE notebooks SET size_bytes = ? WHERE id = ? AND customer_id = ?",
+            (size_bytes, notebook_id, customer_id),
+        )
 
     # ------------------------------------------------------------------ runs
 
@@ -511,8 +662,15 @@ class Database:
         assets_archive_path: str | None,
         assets_sha256: str | None,
         base_model: str | None,
+        customer_id: str | None = None,
+        dataset_name: str | None = None,
     ) -> dict[str, Any]:
-        """平台控制面推送的闭环执行（不涉及 notebook 版本语义）。"""
+        """平台控制面推送的闭环执行（不涉及 notebook 版本语义）。
+
+        `customer_id` 是**执行身份**：平台把它配置的 TrainHub 平台客户传进来，
+        run 落到该客户名下，客户用自己令牌登录控制台即可看到平台发起的任务。
+        缺省仍归系统客户（兼容未配置身份的旧控制面）。
+        """
         now = utc_now()
         self._execute(
             "INSERT INTO runs "
@@ -520,11 +678,12 @@ class Database:
             " status, kernel, parameters, timeout_seconds, created_at, origin, control_job_id, "
             " code_archive_path, code_sha256, entry, dataset_archive_path, dataset_sha256, "
             " assets_archive_path, assets_sha256, base_model) "
-            "VALUES (?, ?, NULL, ?, NULL, NULL, ?, 'queued', ?, ?, ?, ?, 'platform', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, NULL, ?, NULL, ?, ?, 'queued', ?, ?, ?, ?, 'platform', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run_id,
-                self.SYSTEM_CUSTOMER_ID,
+                customer_id or self.SYSTEM_CUSTOMER_ID,
                 Path(code_archive_path).name,
+                dataset_name or None,
                 name,
                 kernel,
                 parameters_json,

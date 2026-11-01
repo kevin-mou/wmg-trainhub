@@ -130,7 +130,7 @@ async def test_delete_dataset_blocked_while_run_active(client, headers, db):
     ).json()["data"]
     notebook = (
         await client.post(
-            "/api/notebooks",
+            "/api/notebooks/import",
             headers=headers,
             data={"name": "sleepy"},
             files=[
@@ -242,7 +242,7 @@ async def test_shared_dataset_usable_by_other_customer_run(client, db, headers):
 
     notebook = (
         await client.post(
-            "/api/notebooks",
+            "/api/notebooks/import",
             headers=other,
             data={"name": "use shared"},
             files=[
@@ -320,7 +320,7 @@ async def test_delete_shared_dataset_blocked_by_other_active_run(client, db, hea
     other = {"Authorization": "Bearer trh_other_busy_token_abcdef"}
     notebook = (
         await client.post(
-            "/api/notebooks",
+            "/api/notebooks/import",
             headers=other,
             data={"name": "busy"},
             files=[

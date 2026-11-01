@@ -7,6 +7,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
+sys.path.insert(0, str(PROJECT_ROOT / "runtime"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from helpers import make_settings  # noqa: E402
@@ -51,5 +52,7 @@ async def client(app):
 
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://trainhub.test") as http_client:
+        async with AsyncClient(
+            transport=transport, base_url="http://trainhub.test", timeout=60.0
+        ) as http_client:
             yield http_client

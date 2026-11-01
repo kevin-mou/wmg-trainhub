@@ -88,7 +88,7 @@ async def upload_notebook(
     name: str = "train",
 ) -> dict[str, Any]:
     response = await client.post(
-        "/api/notebooks",
+        "/api/notebooks/import",
         headers=headers,
         data={"name": name},
         files=[("file", ("train.ipynb", notebook_bytes(*sources), "application/json"))],

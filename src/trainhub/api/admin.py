@@ -13,8 +13,13 @@ from fastapi.responses import FileResponse, StreamingResponse
 from .. import __version__
 from ..config import Settings
 from ..db import Database
-from ..kernels import default_kernel_name, jupyter_available, list_kernels
+from ..kernels import (
+    effective_default_kernel,
+    effective_kernels,
+    jupyter_available,
+)
 from ..metrics import DEFAULT_MAX_POINTS
+from ..model_cache import model_cache_summary
 from ..responses import ApiError, ok, page_data
 from ..runner import RunExecutor
 from ..schemas import CustomerCreate, CustomerStatusUpdate
@@ -207,6 +212,7 @@ def admin_cancel_run(
 
 @router.get("/executor/status")
 async def admin_executor_status(
+    request: Request,
     db: Database = Depends(get_db),
     storage: Storage = Depends(get_storage),
     settings: Settings = Depends(get_settings),
@@ -215,7 +221,8 @@ async def admin_executor_status(
     counts = db.global_run_status_counts()
     gpus = await run_in_threadpool(gpu_info)
     cpu = await run_in_threadpool(cpu_info)
-    kernels = await run_in_threadpool(list_kernels)
+    kernels = await run_in_threadpool(effective_kernels, settings)
+    sandbox = await run_in_threadpool(request.app.state.sandbox.status)
     return ok(
         {
             "maxConcurrentRuns": settings.max_concurrent_runs,
@@ -227,10 +234,19 @@ async def admin_executor_status(
             "disk": storage.disk_usage(),
             "kernels": [str(item.get("name") or "") for item in kernels if item.get("name")],
             "jupyterAvailable": jupyter_available(),
-            "defaultKernel": default_kernel_name(),
+            "defaultKernel": effective_default_kernel(settings),
+            "sandbox": sandbox,
             "version": __version__,
         }
     )
+
+
+@router.get("/models")
+def admin_model_cache(
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    """共享模型缓存概览（服务级基础资源，只读）。"""
+    return ok(model_cache_summary(settings))
 
 
 @router.get("/runs/{run_id}/logs/stream")
@@ -324,6 +340,9 @@ async def admin_create_execution(
     timeoutSeconds: int = Form(0),
     baseModel: str = Form(""),
     controlJobId: str = Form(""),
+    customerId: str = Form(""),
+    datasetName: str = Form(""),
+    datasetVersion: int = Form(0),
     db: Database = Depends(get_db),
     storage: Storage = Depends(get_storage),
     executor: RunExecutor = Depends(get_executor),
@@ -356,6 +375,8 @@ async def admin_create_execution(
         timeout_seconds=timeoutSeconds or None,
         base_model=baseModel,
         control_job_id=controlJobId,
+        customer_id=customerId or None,
+        dataset_name=(datasetName or "").strip() or None,
     )
     executor.enqueue(run["id"])
     return ok(run_public(run, has_logs=False), message="平台执行任务已入队", code=201)
@@ -380,7 +401,10 @@ def list_customers(
 
 @router.post("/customers")
 def create_customer(payload: CustomerCreate, db: Database = Depends(get_db)) -> dict:
-    customer = db.create_customer(payload.name, payload.email, new_customer_token())
+    token = (payload.token or "").strip() or new_customer_token()
+    if payload.token and db.get_customer_by_token(token):
+        raise ApiError("访问令牌已被其他客户使用", 409)
+    customer = db.create_customer(payload.name, payload.email, token)
     return ok(customer_public(customer, include_token=True), message="客户已创建", code=201)
 
 
