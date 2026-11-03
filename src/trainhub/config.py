@@ -105,6 +105,8 @@ class Settings:
     sandbox_ipc_dir: Path | None = None
     sandbox_model_cache_ro: bool = True
     sandbox_python: str = "python3"
+    # Docker 模式暴露的内核名（逗号分隔）；空 = 读 deploy/runtimes/runtimes.json
+    sandbox_kernels: str = ""
     # 本机内核额外放行的环境变量（逗号分隔）；默认只继承非敏感白名单
     kernel_env_allow: str = ""
 

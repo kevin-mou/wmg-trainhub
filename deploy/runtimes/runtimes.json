@@ -1,0 +1,16 @@
+{
+  "kernels": [
+    {
+      "name": "wmg-trainer",
+      "displayName": "WMG Trainer (Qwen / default)"
+    },
+    {
+      "name": "wmg-trainer-laya",
+      "displayName": "WMG Trainer (Laya)"
+    },
+    {
+      "name": "wmg-trainer-startlux",
+      "displayName": "WMG Trainer (StartLux)"
+    }
+  ]
+}

@@ -59,9 +59,57 @@ def default_kernel_name() -> str | None:
     return FALLBACK_KERNEL_NAME if FALLBACK_KERNEL_NAME in names else names[0]
 
 
+
+
+_RUNTIMES_MANIFEST = Path(__file__).resolve().parents[2] / "deploy" / "runtimes" / "runtimes.json"
+
+
+def _kernel_entry(name: str, display_name: str | None = None) -> dict[str, str]:
+    return {
+        "name": name.strip(),
+        "displayName": (display_name or name).strip(),
+        "language": "python",
+    }
+
+
+def configured_kernels(raw: str) -> list[dict[str, str]]:
+    """解析 TRAINHUB_SANDBOX_KERNELS（逗号分隔的 kernel 名）。"""
+    names = [item.strip() for item in (raw or "").split(",") if item.strip()]
+    return [_kernel_entry(name) for name in names]
+
+
+def manifest_kernels() -> list[dict[str, str]]:
+    """Docker 镜像声明的可用内核（随仓库 deploy/runtimes/runtimes.json 分发）。"""
+    if not _RUNTIMES_MANIFEST.is_file():
+        return []
+    try:
+        payload = json.loads(_RUNTIMES_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("读取 runtimes.json 失败", exc_info=True)
+        return []
+    items = payload.get("kernels") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return []
+    kernels: list[dict[str, str]] = []
+    for item in items:
+        if isinstance(item, dict) and str(item.get("name") or "").strip():
+            kernels.append(
+                _kernel_entry(
+                    str(item["name"]),
+                    str(item.get("displayName") or item["name"]),
+                )
+            )
+    return kernels
+
 def effective_kernels(settings: Settings) -> list[dict[str, str]]:
     """UI/API 展示的内核：Docker 沙箱只提供镜像自带的 Python 内核。"""
     if getattr(settings, "sandbox_mode", "none") == "docker":
+        kernels = configured_kernels(getattr(settings, "sandbox_kernels", "") or "")
+        if kernels:
+            return kernels
+        kernels = manifest_kernels()
+        if kernels:
+            return kernels
         return [
             {
                 "name": FALLBACK_KERNEL_NAME,
