@@ -347,9 +347,10 @@ async def admin_create_execution(
     storage: Storage = Depends(get_storage),
     executor: RunExecutor = Depends(get_executor),
 ) -> dict:
-    """平台控制面推送一次闭环执行：代码包 + 数据集包 + 参数。
+    """平台控制面推送一次闭环执行：代码包 + 参数（数据集归档可选）。
 
-    只排队执行，不保存 notebook 版本；版本语义由控制面作业记录承担。
+    训练任务只提交脚本，数据集由「推送」写入节点 hub、由脚本按名称加载；评估链路仍可
+    随任务上传数据集归档。只排队执行，不保存 notebook 版本；版本语义由控制面作业记录承担。
     """
     params: dict[str, Any] | None = None
     raw = (parameters or "").strip()

@@ -179,30 +179,30 @@ export async function renderOverview(root, ctx) {
       ${liveBlock}
 
       <div class="ledger">
-        <div class="ledger-item">
+        <a class="ledger-item ledger-item-nav" href="#/datasets">
           <div class="ledger-value">${stats.datasets}</div>
           <div class="ledger-label">${escapeHtml(t("overview.stats.datasets"))}</div>
-        </div>
-        <div class="ledger-item">
+        </a>
+        <a class="ledger-item ledger-item-nav" href="#/notebooks">
           <div class="ledger-value">${stats.notebooks}</div>
           <div class="ledger-label">${escapeHtml(t("overview.stats.notebooks"))}</div>
-        </div>
-        <div class="ledger-item">
+        </a>
+        <a class="ledger-item ledger-item-nav" href="#/runs">
           <div class="ledger-value">${stats.runs}${
             stats.activeRuns ? `<small>+${stats.activeRuns}</small>` : ""
           }</div>
           <div class="ledger-label">${escapeHtml(t("overview.stats.runs"))}</div>
-        </div>
+        </a>
         <div class="ledger-item">
           <div class="ledger-value">${successRate}</div>
           <div class="ledger-label">${escapeHtml(t("overview.stats.successRate"))}</div>
         </div>
-        <div class="ledger-item">
+        <a class="ledger-item ledger-item-nav" href="#/storage">
           <div class="ledger-value">${formatBytes(storage.customerBytes)}</div>
           <div class="ledger-label" title="${escapeHtml(
             `free ${formatBytes(storage.disk.freeBytes)}`
           )}">${escapeHtml(t("overview.stats.storage"))}</div>
-        </div>
+        </a>
       </div>
 
       <div class="overview-grid">

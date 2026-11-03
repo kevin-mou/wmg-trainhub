@@ -5,6 +5,7 @@ import {
   highlightActiveLine,
   highlightSpecialChars,
   keymap,
+  lineNumbers,
   placeholder,
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
@@ -52,7 +53,19 @@ const theme = EditorView.theme(
     ".cm-activeLine": {
       backgroundColor: "color-mix(in srgb, var(--brass) 6%, transparent)",
     },
-    ".cm-gutters": { display: "none" },
+    ".cm-gutters": {
+      backgroundColor: "var(--surface)",
+      color: "var(--ink-3)",
+      borderRight: "1px solid var(--line)",
+      fontFamily: "var(--font-mono)",
+      fontSize: "12px",
+      userSelect: "none",
+    },
+    ".cm-lineNumbers .cm-gutterElement": { padding: "0 8px 0 12px" },
+    ".cm-activeLineGutter": {
+      backgroundColor: "transparent",
+      color: "var(--ink-2)",
+    },
     ".cm-placeholder": { color: "var(--ink-3)" },
     ".cm-tooltip": {
       backgroundColor: "var(--surface)",
@@ -116,6 +129,11 @@ function languageExtension(language) {
   return [];
 }
 
+// Jupyter 同款约定：只有代码单元格显示行号，Markdown / raw 不占左侧留白。
+function lineNumberExtension(language) {
+  return language === "python" ? lineNumbers() : [];
+}
+
 export function createNotebookEditor({
   parent,
   value,
@@ -149,6 +167,7 @@ export function createNotebookEditor({
         }),
         theme,
         languageExtension(language),
+        lineNumberExtension(language),
         keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
         EditorView.updateListener.of((update) => {
           if (update.docChanged && onChange) onChange(update.state.doc.toString());

@@ -352,13 +352,14 @@ async def test_notebook_client_uses_sandbox_manager(tmp_path):
         shutil.rmtree(ipc_dir, ignore_errors=True)
 
 
-async def test_kernel_session_sandbox_mounts_dataset_and_env(
+async def test_kernel_session_sandbox_catalog_dataset_access(
     client, app, db, customer, headers, tmp_path
 ):
     import subprocess
     import tempfile
 
     from helpers import upload_dataset
+    from trainhub.dataset_catalog import accessible_dataset_entries
     from trainhub.kernel_sessions import KernelSession
 
     class LocalSandbox(DockerSandbox):
@@ -408,10 +409,8 @@ async def test_kernel_session_sandbox_mounts_dataset_and_env(
         def logs(self, name, tail=100):
             return ""
 
-    dataset = await upload_dataset(client, headers, name="sandbox-dataset")
-    dataset_row = db.get_accessible_dataset(customer["id"], dataset["id"])
-    assert dataset_row is not None
-    dataset_files = db.get_dataset_files(dataset["id"])
+    await upload_dataset(client, headers, name="sandbox-dataset")
+    entries = accessible_dataset_entries(db, app.state.storage, customer["id"])
     settings = make_settings(tmp_path, sandbox_mode="docker")
     sandbox = LocalSandbox(settings)
     session = None
@@ -424,14 +423,14 @@ async def test_kernel_session_sandbox_mounts_dataset_and_env(
             settings=settings,
             storage=app.state.storage,
             session_id="ks_sandbox",
-            dataset=dataset_row,
-            dataset_files=dataset_files,
+            catalog_entries=entries,
             sandbox=sandbox,
         )
         result = await session.execute(
-            "import os; from pathlib import Path; "
-            "print('NAME', os.environ.get('WMG_DATASET_NAME')); "
-            "print('FILES', sorted(p.name for p in Path(os.environ['WMG_DATASET_DIR']).iterdir()))",
+            "from pathlib import Path; "
+            "from trainhub_runtime import dataset_path, list_datasets; "
+            "print('NAME', list_datasets()[0]['name']); "
+            "print('FILES', sorted(p.name for p in Path(dataset_path('sandbox-dataset')).iterdir()))",
             30,
         )
         assert result["status"] == "ok", result

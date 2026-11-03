@@ -110,6 +110,9 @@ export const icons = {
   runs: icon(
     '<circle cx="12" cy="12" r="8.5"/><path d="M10 8.8v6.4l5.2-3.2L10 8.8Z" fill="currentColor" stroke="none"/>'
   ),
+  storage: icon(
+    '<rect x="3.5" y="4.5" width="17" height="6.2" rx="1.8"/><rect x="3.5" y="13.3" width="17" height="6.2" rx="1.8"/><path d="M7.2 7.6h.01M7.2 16.4h.01"/><path d="M11 7.6h6M11 16.4h6"/>'
+  ),
   activity: icon(
     '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 1.8"/>'
   ),

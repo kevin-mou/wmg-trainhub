@@ -301,6 +301,60 @@ async def test_shared_dataset_usable_by_other_customer_run(client, db, headers):
     assert "dataset.unshare" in actions
 
 
+async def test_shared_dataset_runtime_helper_in_customer_run(client, app, db, customer, headers):
+    dataset = await upload_dataset(
+        client, headers, name="shared runtime", content=b"shared-helper-data", shared=True
+    )
+    db.create_customer("Helper Co", None, "trh_other_helper_token_abcdef")
+    other = {"Authorization": "Bearer trh_other_helper_token_abcdef"}
+    storage = app.state.storage
+    shared_ref = f"{customer['id']}/shared runtime"
+
+    notebook = (
+        await client.post(
+            "/api/notebooks/import",
+            headers=other,
+            data={"name": "shared runtime helper"},
+            files=[
+                (
+                    "file",
+                    (
+                        "helper.ipynb",
+                        notebook_bytes(
+                            "import os\n"
+                            "from trainhub_runtime import dataset_path\n"
+                            f"print('HELPER=' + dataset_path('{shared_ref}'))\n"
+                            "print('CURRENT=' + dataset_path())\n"
+                            "print('DATA=' + open(os.path.join("
+                            f"dataset_path('{shared_ref}'), 'a.txt')).read())\n"
+                        ),
+                        "application/json",
+                    ),
+                )
+            ],
+        )
+    ).json()["data"]
+    run = (
+        await client.post(
+            "/api/runs",
+            headers=other,
+            json={"notebookId": notebook["id"], "datasetId": dataset["id"]},
+        )
+    ).json()["data"]
+
+    from helpers import wait_for_status
+
+    final = await wait_for_status(client, other, run["id"], ("succeeded", "failed"))
+    assert final["status"] == "succeeded", final.get("message")
+    logs = (await client.get(f"/api/runs/{run['id']}/logs", headers=other)).json()["data"]
+    text = logs["content"]
+    owner_dir = storage.dataset_files_dir(customer["id"], dataset["id"])
+
+    assert f"HELPER={owner_dir}" in text
+    assert f"CURRENT={owner_dir}" in text
+    assert "DATA=shared-helper-data" in text
+
+
 async def test_overview_counts_only_own_datasets(client, db, headers):
     await upload_dataset(client, headers, name="shared stat", shared=True)
     db.create_customer("Stat Co", None, "trh_other_stat_token_abcdef")

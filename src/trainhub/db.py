@@ -52,7 +52,6 @@ CREATE TABLE IF NOT EXISTS notebooks (
     size_bytes INTEGER NOT NULL DEFAULT 0,
     cell_count INTEGER NOT NULL DEFAULT 0,
     storage_path TEXT NOT NULL,
-    dataset_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -158,7 +157,6 @@ class Database:
             ("runs", "dataset_owner_id", "TEXT"),
             ("runs", "dataset_owner_name", "TEXT"),
             ("datasets", "visibility", "TEXT NOT NULL DEFAULT 'private'"),
-            ("notebooks", "dataset_id", "TEXT"),
         ):
             try:
                 self._execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
@@ -334,6 +332,19 @@ class Database:
             (dataset_id, customer_id),
         )
 
+    def list_accessible_datasets(self, customer_id: str) -> list[dict[str, Any]]:
+        """当前客户可见的全部数据集（自有 + 共享），自己的排在前面。
+
+        供运行时数据集清单使用：列表不带分页，路径由调用方按 owner_id 解析。
+        """
+        return self._query(
+            "SELECT d.*, c.name AS owner_name "
+            "FROM datasets d JOIN customers c ON c.id = d.customer_id "
+            "WHERE d.customer_id = ? OR d.visibility = 'shared' "
+            "ORDER BY (d.customer_id = ?) DESC, d.created_at DESC, d.id DESC",
+            (customer_id, customer_id),
+        )
+
     def set_dataset_visibility(
         self, customer_id: str, dataset_id: str, visibility: str
     ) -> dict[str, Any] | None:
@@ -343,9 +354,6 @@ class Database:
         )
         if cursor.rowcount != 1:
             return None
-        if visibility != "shared":
-            # 取消共享后，其他客户 Notebook 上的选择不再可用，直接清除引用。
-            self.clear_notebook_dataset_references(dataset_id, keep_customer_id=customer_id)
         return self.get_accessible_dataset(customer_id, dataset_id)
 
     def get_dataset_files(self, dataset_id: str) -> list[dict[str, Any]]:
@@ -419,27 +427,10 @@ class Database:
         dataset = self.get_dataset(customer_id, dataset_id)
         if dataset is None:
             return None
-        self.clear_notebook_dataset_references(dataset_id)
         self._execute(
             "DELETE FROM datasets WHERE id = ? AND customer_id = ?", (dataset_id, customer_id)
         )
         return dataset
-
-    def clear_notebook_dataset_references(
-        self, dataset_id: str, *, keep_customer_id: str | None = None
-    ) -> None:
-        """数据集删除/取消共享时清理 Notebook 选择，避免悬空引用。"""
-        if keep_customer_id:
-            self._execute(
-                "UPDATE notebooks SET dataset_id = NULL "
-                "WHERE dataset_id = ? AND customer_id != ?",
-                (dataset_id, keep_customer_id),
-            )
-        else:
-            self._execute(
-                "UPDATE notebooks SET dataset_id = NULL WHERE dataset_id = ?",
-                (dataset_id,),
-            )
 
     # ------------------------------------------------------------------ notebooks
 
@@ -500,17 +491,6 @@ class Database:
                 customer_id,
             ),
         )
-        return self.get_notebook(customer_id, notebook_id)
-
-    def set_notebook_dataset(
-        self, customer_id: str, notebook_id: str, dataset_id: str | None
-    ) -> dict[str, Any] | None:
-        cursor = self._execute(
-            "UPDATE notebooks SET dataset_id = ? WHERE id = ? AND customer_id = ?",
-            (dataset_id, notebook_id, customer_id),
-        )
-        if cursor.rowcount != 1:
-            return None
         return self.get_notebook(customer_id, notebook_id)
 
     def get_notebook(self, customer_id: str, notebook_id: str) -> dict[str, Any] | None:

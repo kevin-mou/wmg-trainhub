@@ -267,9 +267,9 @@ function renderCellPreview(cell, index, type) {
     }
     return `<div class="nb-cell-preview nb-markdown-preview" data-preview-cell="${index}">${html}</div>`;
   }
-  return `<pre class="nb-cell-preview nb-code-preview" data-preview-cell="${index}" ${
-    type === "code" ? `data-code-preview="${index}"` : ""
-  }>${escapeHtml(source)}</pre>`;
+  return `<pre class="nb-cell-preview nb-code-preview" data-preview-cell="${index}">${escapeHtml(
+    source
+  )}</pre>`;
 }
 
 function detectedTypeText(cell) {
@@ -326,27 +326,22 @@ export async function renderNotebookEditor(root, ctx) {
   let activeIndex = 0;
   let lastDeleteAt = 0;
   let editingIndex = null;
-  let editorInstance = null;
+  let editorInstances = new Map();
+  let codeMirrorBroken = false;
   let editorBlurTimer = null;
   let runningIndex = null;
   let pendingRun = false;
   let restarting = false;
   let openTypeMenuIndex = null;
-  let datasets = [];
-  let notebookDatasetId = null;
-  let savingDataset = false;
 
   root.innerHTML = `<div class="loading">${escapeHtml(t("common.loading"))}</div>`;
 
   try {
     if (notebookId) {
-      const [detail, contentData, datasetPage] = await Promise.all([
+      const [detail, contentData] = await Promise.all([
         http.get(`/api/notebooks/${notebookId}`),
         http.get(`/api/notebooks/${notebookId}/content`),
-        http.get("/api/datasets?page=1&size=100").catch(() => null),
       ]);
-      datasets = Array.isArray(datasetPage?.records) ? datasetPage.records : [];
-      notebookDatasetId = detail.datasetId || null;
       let sessionData = null;
       try {
         sessionData = await http.get(`/api/notebooks/${notebookId}/session`);
@@ -381,8 +376,6 @@ export async function renderNotebookEditor(root, ctx) {
       documentNode = defaultContent();
       cells = documentNode.cells.map((cell) => ({ ...cell }));
       notebookName = t("notebooks.editor.untitled");
-      datasets = [];
-      notebookDatasetId = null;
     }
   } catch (error) {
     if (disposed) return;
@@ -397,42 +390,6 @@ export async function renderNotebookEditor(root, ctx) {
     return () => {
       disposed = true;
     };
-  }
-
-  function datasetLabel(dataset) {
-    if (!dataset) return "";
-    if (!dataset.isOwner) {
-      return `${dataset.name} · ${t("runs.sharedFrom", {
-        name: dataset.ownerName || "?",
-      })}`;
-    }
-    return dataset.shared
-      ? `${dataset.name} · ${t("datasets.sharedBadge")}`
-      : dataset.name;
-  }
-
-  function datasetOptions() {
-    const options = [
-      `<option value="">${escapeHtml(t("notebooks.editor.datasetNone"))}</option>`,
-    ];
-    let found = false;
-    for (const dataset of datasets) {
-      const selected = dataset.id === notebookDatasetId;
-      if (selected) found = true;
-      options.push(
-        `<option value="${escapeHtml(dataset.id)}"${selected ? " selected" : ""}>${escapeHtml(
-          datasetLabel(dataset)
-        )}</option>`
-      );
-    }
-    if (notebookDatasetId && !found) {
-      options.push(
-        `<option value="${escapeHtml(notebookDatasetId)}" selected>${escapeHtml(
-          t("notebooks.editor.datasetUnavailable")
-        )}</option>`
-      );
-    }
-    return options.join("");
   }
 
   root.innerHTML = `
@@ -470,14 +427,6 @@ export async function renderNotebookEditor(root, ctx) {
       <div class="nb-editor-toolbar" id="nb-editor-toolbar" role="toolbar"
         aria-label="${escapeHtml(t("notebooks.editor.toolbar"))}">
         <span class="nb-toolbar-cell" id="nb-toolbar-cell"></span>
-        <label class="nb-editor-dataset"
-          data-tooltip="${escapeHtml(t("notebooks.editor.datasetHint"))}">
-          <span>${escapeHtml(t("notebooks.editor.dataset"))}</span>
-          <select id="nb-editor-dataset"
-            aria-label="${escapeHtml(t("notebooks.editor.dataset"))}">
-            ${datasetOptions()}
-          </select>
-        </label>
         <div class="nb-toolbar-actions">
           <button type="button" class="nb-toolbar-text-btn" data-toolbar-action="run-all"
             data-tooltip="${escapeHtml(t("notebooks.editor.runAllHint"))}">
@@ -542,7 +491,6 @@ export async function renderNotebookEditor(root, ctx) {
   const statusLabel = root.querySelector("#nb-editor-status");
   const backLink = root.querySelector("#nb-editor-back");
   const editorToolbar = root.querySelector("#nb-editor-toolbar");
-  const datasetSelect = root.querySelector("#nb-editor-dataset");
   const toolbarCell = root.querySelector("#nb-toolbar-cell");
   let tooltipTarget = null;
   let tooltipHideTimer = null;
@@ -812,9 +760,6 @@ export async function renderNotebookEditor(root, ctx) {
         })
       : t("notebooks.editor.noActiveCell");
     const busy = isBusy();
-    if (datasetSelect) {
-      datasetSelect.disabled = busy || savingDataset || !notebookId;
-    }
     const hasRunnableCode = cells.some(
       (item) => effectiveCellType(item) === "code" && sourceOf(item).trim()
     );
@@ -865,19 +810,111 @@ export async function renderNotebookEditor(root, ctx) {
     renderToc();
   }
 
-  function destroyEditor() {
-    if (editorInstance) {
-      editorInstance.destroy();
-      editorInstance = null;
-    }
+  /** code 单元格常驻编辑态（点击即聚焦，不再先渲染预览再切换，避免进入编辑时闪烁/跳动） */
+  function isAlwaysEditCell(cell) {
+    return Boolean(cell) && !codeMirrorBroken && effectiveCellType(cell) === "code";
+  }
+
+  function destroyEditors() {
+    for (const cellEditor of editorInstances.values()) cellEditor.destroy();
+    editorInstances.clear();
     if (editorBlurTimer) {
       clearTimeout(editorBlurTimer);
       editorBlurTimer = null;
     }
   }
 
+  /** 单元格模板：整页渲染与单格重绘共用，避免两处模板漂移 */
+  function renderCellMarkup(cell, index) {
+    const type = effectiveCellType(cell);
+    const typeValue = TYPE_OPTIONS.includes(cell.cell_type) ? cell.cell_type : "auto";
+    const detected =
+      typeValue === "auto"
+        ? `<span class="nb-cell-detected" data-detected="${index}">${escapeHtml(
+            detectedTypeText(cell)
+          )}</span>`
+        : `<span class="nb-cell-detected" data-detected="${index}"></span>`;
+    const alwaysEdit = isAlwaysEditCell(cell);
+    const editing = index === editingIndex || alwaysEdit;
+    const markdownPreview = type === "markdown" && !editing;
+    const quickRun =
+      type === "code"
+        ? `<button type="button" class="nb-cell-run" data-quick-run="${index}"
+          data-tooltip="${escapeHtml(t("notebooks.editor.runCellHint"))}"
+          aria-label="${escapeHtml(t("notebooks.editor.runCellHint"))}">${icons.runs}</button>`
+        : "";
+    const body = editing
+      ? `<div class="nb-cell-editor" data-editor-host="${index}"><div class="nb-editor-loading">${escapeHtml(
+          t("common.loading")
+        )}</div></div>`
+      : renderCellPreview(cell, index, type);
+    const running = runningIndex === index;
+    return `<div class="nb-cell ${index === activeIndex ? "active" : ""} ${
+      index === editingIndex ? "editing" : ""
+    } ${running ? "running" : ""} ${
+      markdownPreview ? "markdown-preview" : ""
+    }" data-cell="${index}">
+      ${
+        markdownPreview
+          ? ""
+          : `<div class="nb-cell-prompt">
+        <span class="nb-cell-index">[${index + 1}]</span>${quickRun}
+      </div>`
+      }
+      <div class="nb-cell-main">
+        ${
+          markdownPreview
+            ? ""
+            : `<div class="nb-cell-head">
+          <div class="nb-cell-type-group" data-cell-type-group="${index}">
+            <button type="button" class="nb-cell-type-button" data-cell-type-button="${index}"
+              aria-haspopup="listbox" aria-expanded="false"
+              aria-label="${escapeHtml(t("notebooks.editor.cellType"))}"
+              data-tooltip="${escapeHtml(t("notebooks.editor.cellType"))}">
+              <span data-cell-type-value="${index}">${escapeHtml(
+                t(`notebooks.editor.${typeValue}`)
+              )}</span>${icons.chevronDown}
+            </button>
+            <div class="nb-cell-type-menu" data-cell-type-menu="${index}"
+              role="listbox" aria-label="${escapeHtml(
+                t("notebooks.editor.cellType")
+              )}" hidden>${typeMenuOptions(typeValue)}</div>
+          </div>${detected}
+          <span class="spacer"></span>
+          <div class="nb-cell-head-actions">
+            <button type="button" class="icon-btn" data-cell-action="insert-below"
+              data-tooltip="${escapeHtml(t("notebooks.editor.insertBelow"))}"
+              aria-label="${escapeHtml(t("notebooks.editor.insertBelow"))}">${icons.insertBelow}</button>
+            <button type="button" class="icon-btn" data-cell-action="insert-above"
+              data-tooltip="${escapeHtml(t("notebooks.editor.insertAbove"))}"
+              aria-label="${escapeHtml(t("notebooks.editor.insertAbove"))}">${icons.insertAbove}</button>
+            <button type="button" class="icon-btn" data-cell-action="move-up"
+              data-tooltip="${escapeHtml(t("notebooks.editor.moveUp"))}"
+              aria-label="${escapeHtml(t("notebooks.editor.moveUp"))}"
+              ${index === 0 ? "disabled" : ""}>${icons.chevronUp}</button>
+            <button type="button" class="icon-btn" data-cell-action="move-down"
+              data-tooltip="${escapeHtml(t("notebooks.editor.moveDown"))}"
+              aria-label="${escapeHtml(t("notebooks.editor.moveDown"))}"
+              ${index === cells.length - 1 ? "disabled" : ""}>${icons.chevronDown}</button>
+            <button type="button" class="icon-btn" data-cell-action="duplicate"
+              data-tooltip="${escapeHtml(t("notebooks.editor.duplicateCell"))}"
+              aria-label="${escapeHtml(t("notebooks.editor.duplicateCell"))}">${icons.copy}</button>
+            <button type="button" class="icon-btn nb-toolbar-danger" data-cell-action="delete"
+              data-tooltip="${escapeHtml(t("notebooks.editor.deleteCell"))}"
+              aria-label="${escapeHtml(t("notebooks.editor.deleteCell"))}">${icons.trash}</button>
+          </div>
+        </div>`
+        }
+        ${body}
+      </div>
+      <div class="nb-cell-output-slot" data-output-slot="${index}">${
+        type === "code" ? renderOutputs(cell, index) : ""
+      }</div>
+    </div>`;
+  }
+
   function renderCells() {
-    destroyEditor();
+    destroyEditors();
     closeCellTypeMenu();
     hideTooltip();
     if (!cells.length) {
@@ -892,125 +929,41 @@ export async function renderNotebookEditor(root, ctx) {
     }
     activeIndex = Math.max(0, Math.min(activeIndex, cells.length - 1));
     if (editingIndex !== null && editingIndex >= cells.length) editingIndex = null;
-    cellsHost.innerHTML = cells
-      .map((cell, index) => {
-        const type = effectiveCellType(cell);
-        const typeValue = TYPE_OPTIONS.includes(cell.cell_type) ? cell.cell_type : "auto";
-        const detected =
-          typeValue === "auto"
-            ? `<span class="nb-cell-detected" data-detected="${index}">${escapeHtml(
-                detectedTypeText(cell)
-              )}</span>`
-            : `<span class="nb-cell-detected" data-detected="${index}"></span>`;
-        const editing = index === editingIndex;
-        const markdownPreview = type === "markdown" && !editing;
-        const quickRun =
-          type === "code"
-            ? `<button type="button" class="nb-cell-run" data-quick-run="${index}"
-              data-tooltip="${escapeHtml(t("notebooks.editor.runCellHint"))}"
-              aria-label="${escapeHtml(t("notebooks.editor.runCellHint"))}">${icons.runs}</button>`
-            : "";
-        const body = editing
-          ? `<div class="nb-cell-editor" data-editor-host="${index}"><div class="nb-editor-loading">${escapeHtml(
-              t("common.loading")
-            )}</div></div>`
-          : renderCellPreview(cell, index, type);
-        const running = runningIndex === index;
-        return `<div class="nb-cell ${index === activeIndex ? "active" : ""} ${
-          editing ? "editing" : ""
-        } ${running ? "running" : ""} ${
-          markdownPreview ? "markdown-preview" : ""
-        }" data-cell="${index}">
-          ${
-            markdownPreview
-              ? ""
-              : `<div class="nb-cell-prompt">
-            <span class="nb-cell-index">[${index + 1}]</span>${quickRun}
-          </div>`
-          }
-          <div class="nb-cell-main">
-            ${
-              markdownPreview
-                ? ""
-                : `<div class="nb-cell-head">
-              <div class="nb-cell-type-group" data-cell-type-group="${index}">
-                <button type="button" class="nb-cell-type-button" data-cell-type-button="${index}"
-                  aria-haspopup="listbox" aria-expanded="false"
-                  aria-label="${escapeHtml(t("notebooks.editor.cellType"))}"
-                  data-tooltip="${escapeHtml(t("notebooks.editor.cellType"))}">
-                  <span data-cell-type-value="${index}">${escapeHtml(
-                    t(`notebooks.editor.${typeValue}`)
-                  )}</span>${icons.chevronDown}
-                </button>
-                <div class="nb-cell-type-menu" data-cell-type-menu="${index}"
-                  role="listbox" aria-label="${escapeHtml(
-                    t("notebooks.editor.cellType")
-                  )}" hidden>${typeMenuOptions(typeValue)}</div>
-              </div>${detected}
-              <span class="spacer"></span>
-              <div class="nb-cell-head-actions">
-                <button type="button" class="icon-btn" data-cell-action="insert-below"
-                  data-tooltip="${escapeHtml(t("notebooks.editor.insertBelow"))}"
-                  aria-label="${escapeHtml(t("notebooks.editor.insertBelow"))}">${icons.insertBelow}</button>
-                <button type="button" class="icon-btn" data-cell-action="insert-above"
-                  data-tooltip="${escapeHtml(t("notebooks.editor.insertAbove"))}"
-                  aria-label="${escapeHtml(t("notebooks.editor.insertAbove"))}">${icons.insertAbove}</button>
-                <button type="button" class="icon-btn" data-cell-action="move-up"
-                  data-tooltip="${escapeHtml(t("notebooks.editor.moveUp"))}"
-                  aria-label="${escapeHtml(t("notebooks.editor.moveUp"))}"
-                  ${index === 0 ? "disabled" : ""}>${icons.chevronUp}</button>
-                <button type="button" class="icon-btn" data-cell-action="move-down"
-                  data-tooltip="${escapeHtml(t("notebooks.editor.moveDown"))}"
-                  aria-label="${escapeHtml(t("notebooks.editor.moveDown"))}"
-                  ${index === cells.length - 1 ? "disabled" : ""}>${icons.chevronDown}</button>
-                <button type="button" class="icon-btn" data-cell-action="duplicate"
-                  data-tooltip="${escapeHtml(t("notebooks.editor.duplicateCell"))}"
-                  aria-label="${escapeHtml(t("notebooks.editor.duplicateCell"))}">${icons.copy}</button>
-                <button type="button" class="icon-btn nb-toolbar-danger" data-cell-action="delete"
-                  data-tooltip="${escapeHtml(t("notebooks.editor.deleteCell"))}"
-                  aria-label="${escapeHtml(t("notebooks.editor.deleteCell"))}">${icons.trash}</button>
-              </div>
-            </div>`
-            }
-            ${body}
-          </div>
-          <div class="nb-cell-output-slot" data-output-slot="${index}">${
-            type === "code" ? renderOutputs(cell, index) : ""
-          }</div>
-        </div>`;
-      })
-      .join("");
+    cellsHost.innerHTML = cells.map((cell, index) => renderCellMarkup(cell, index)).join("");
     renderToc();
     syncToolbar();
-    void enhanceCodePreviews();
-    if (editingIndex !== null) void mountEditor(editingIndex);
+    mountCellEditors();
   }
 
-  function enhanceCodePreviews() {
-    const previews = Array.from(cellsHost.querySelectorAll("[data-code-preview]"));
-    if (!previews.length) return;
-    if (!codeMirrorModulePromise) {
-      codeMirrorModulePromise = import("../vendor/trainhub-codemirror.js");
+  function mountCellEditors() {
+    cells.forEach((cell, index) => {
+      if (isAlwaysEditCell(cell) || index === editingIndex) void mountEditor(index);
+    });
+  }
+
+  /** 单格重绘：只重建目标单元格，不打断其余已挂载编辑器的焦点与滚动位置 */
+  function rerenderCell(index) {
+    const cell = cells[index];
+    const node = cellsHost.querySelector(`[data-cell="${index}"]`);
+    if (!cell || !node) return;
+    const mounted = editorInstances.get(index);
+    if (mounted) {
+      mounted.destroy();
+      editorInstances.delete(index);
     }
-    return codeMirrorModulePromise
-      .then((module) => {
-        if (disposed || typeof module.renderCodePreview !== "function") return;
-        for (const node of previews) {
-          if (!node.isConnected) continue;
-          const index = Number(node.dataset.codePreview);
-          if (!Number.isInteger(index) || editingIndex === index) continue;
-          const cell = cells[index];
-          if (!cell) continue;
-          const html = module.renderCodePreview(sourceOf(cell), "python");
-          if (html != null) node.innerHTML = html;
-        }
-      })
-      .catch(() => {});
+    const template = document.createElement("template");
+    template.innerHTML = renderCellMarkup(cell, index).trim();
+    const fresh = template.content.firstElementChild;
+    if (!fresh) return;
+    node.replaceWith(fresh);
+    if (isAlwaysEditCell(cell) || index === editingIndex) void mountEditor(index);
   }
 
   async function mountEditor(index) {
     const cell = cells[index];
-    if (!cell || editingIndex !== index) return;
+    if (!cell) return;
+    if (!isAlwaysEditCell(cell) && editingIndex !== index) return;
+    if (editorInstances.has(index)) return;
     const host = cellsHost.querySelector(`[data-editor-host="${index}"]`);
     if (!host) return;
     if (!codeMirrorModulePromise) {
@@ -1020,15 +973,22 @@ export async function renderNotebookEditor(root, ctx) {
     try {
       module = await codeMirrorModulePromise;
     } catch (error) {
+      // 加载失败即整体回落到只读预览，避免常驻编辑态反复重试/刷提示；
+      // 并发挂载共用同一个 promise，只有首个失败者弹提示并重绘
       codeMirrorModulePromise = null;
+      if (codeMirrorBroken) return;
+      codeMirrorBroken = true;
       toast(`CodeMirror: ${error.message}`, "error");
-      editingIndex = null;
-      renderCells();
+      if (!disposed) {
+        editingIndex = null;
+        renderCells();
+      }
       return;
     }
     if (
       disposed ||
-      editingIndex !== index ||
+      editorInstances.has(index) ||
+      (!isAlwaysEditCell(cell) && editingIndex !== index) ||
       (typeof host.isConnected === "boolean" && !host.isConnected)
     ) {
       return;
@@ -1037,7 +997,7 @@ export async function renderNotebookEditor(root, ctx) {
     const type = effectiveCellType(cell);
     const language = type === "markdown" ? "markdown" : type === "code" ? "python" : "none";
     try {
-      editorInstance = module.createNotebookEditor({
+      const cellEditor = module.createNotebookEditor({
         parent: host,
         value: sourceOf(cell),
         language,
@@ -1061,11 +1021,16 @@ export async function renderNotebookEditor(root, ctx) {
           renderToc();
         },
         onFocus: () => setActiveIndex(index),
-        onBlur: () => scheduleStopEditing(index),
+        onBlur: () => {
+          if (!isAlwaysEditCell(cells[index])) scheduleStopEditing(index);
+        },
       });
+      editorInstances.set(index, cellEditor);
     } catch (error) {
+      if (codeMirrorBroken) return;
+      codeMirrorBroken = true;
       toast(`CodeMirror: ${error.message}`, "error");
-      if (!disposed && editingIndex === index) {
+      if (!disposed) {
         editingIndex = null;
         renderCells();
       }
@@ -1080,26 +1045,33 @@ export async function renderNotebookEditor(root, ctx) {
       const cell = cellsHost.querySelector(`[data-cell="${index}"]`);
       if (cell && cell.contains(document.activeElement)) return;
       editingIndex = null;
-      renderCells();
+      rerenderCell(index);
     }, 120);
   }
 
   function startEditing(index) {
-    if (!cells[index]) return;
-    activeIndex = index;
+    const cell = cells[index];
+    if (!cell || codeMirrorBroken) return;
+    setActiveIndex(index);
+    if (isAlwaysEditCell(cell)) {
+      editorInstances.get(index)?.focus();
+      return;
+    }
+    const previous = editingIndex;
     editingIndex = index;
     if (editorBlurTimer) {
       clearTimeout(editorBlurTimer);
       editorBlurTimer = null;
     }
-    renderCells();
+    if (previous !== null && previous !== index) rerenderCell(previous);
+    rerenderCell(index);
   }
 
   function insertCellAt(index, type) {
     const at = Math.max(0, Math.min(index, cells.length));
     cells.splice(at, 0, newCell(type));
     activeIndex = at;
-    editingIndex = at;
+    editingIndex = isAlwaysEditCell(cells[at]) ? null : at;
     markScriptDirty();
     renderCells();
   }
@@ -1124,7 +1096,7 @@ export async function renderNotebookEditor(root, ctx) {
     }
     cells.splice(index + 1, 0, copy);
     activeIndex = index + 1;
-    editingIndex = activeIndex;
+    editingIndex = isAlwaysEditCell(cells[activeIndex]) ? null : activeIndex;
     markScriptDirty();
     renderCells();
   }
@@ -1163,6 +1135,7 @@ export async function renderNotebookEditor(root, ctx) {
       delete cell.execution_count;
     }
     activeIndex = index;
+    if (isAlwaysEditCell(cell) && editingIndex === index) editingIndex = null;
     markScriptDirty();
     renderCells();
   }
@@ -1299,6 +1272,7 @@ export async function renderNotebookEditor(root, ctx) {
     }
     if (disposed || editingIndex === null) return;
     if (!element || typeof element.closest !== "function") return;
+    const exiting = editingIndex;
     const preview = element.closest("[data-preview-cell]");
     if (preview) {
       if (editingIndex === Number(preview.dataset.previewCell)) return;
@@ -1306,19 +1280,19 @@ export async function renderNotebookEditor(root, ctx) {
       if (link && link.getAttribute("href")) {
         editingIndex = null;
         setTimeout(() => {
-          if (!disposed) renderCells();
+          if (!disposed) rerenderCell(exiting);
         }, 0);
         return;
       }
       editingIndex = null;
-      renderCells();
+      rerenderCell(exiting);
       return;
     }
     if (element.closest("[data-editor-host]")) {
       return;
     }
     editingIndex = null;
-    renderCells();
+    rerenderCell(exiting);
   }
 
   document.addEventListener("click", handleDocumentClick);
@@ -1339,8 +1313,9 @@ export async function renderNotebookEditor(root, ctx) {
   function gotoCell(index) {
     setActiveIndex(index);
     if (editingIndex !== null) {
+      const exiting = editingIndex;
       editingIndex = null;
-      renderCells();
+      rerenderCell(exiting);
     }
     scrollBelowAffix(cellsHost.querySelector(`[data-cell="${index}"]`));
   }
@@ -2063,35 +2038,6 @@ export async function renderNotebookEditor(root, ctx) {
     }
   }
 
-  async function saveDatasetSelection() {
-    if (!datasetSelect) return;
-    if (!notebookId) {
-      toast(t("notebooks.editor.saveNotebookFirst"), "info");
-      datasetSelect.value = notebookDatasetId || "";
-      return;
-    }
-    const previous = notebookDatasetId;
-    const next = datasetSelect.value || null;
-    if (next === previous) return;
-    savingDataset = true;
-    syncToolbar();
-    try {
-      const saved = await http.put(`/api/notebooks/${notebookId}/dataset`, {
-        datasetId: next,
-      });
-      notebookDatasetId = saved.datasetId || null;
-      toast(t("notebooks.editor.datasetSaved"), "success");
-    } catch (error) {
-      notebookDatasetId = previous;
-      toast(error.message, "error");
-    } finally {
-      savingDataset = false;
-      datasetSelect.innerHTML = datasetOptions();
-      datasetSelect.value = notebookDatasetId || "";
-      syncToolbar();
-    }
-  }
-
   function onKeydown(event) {
     const target = event.target;
     const editing =
@@ -2141,11 +2087,6 @@ export async function renderNotebookEditor(root, ctx) {
 
   saveButton.addEventListener("click", save);
   saveSessionButton.addEventListener("click", saveSession);
-  if (datasetSelect) {
-    datasetSelect.addEventListener("change", () => {
-      void saveDatasetSelection();
-    });
-  }
   backLink.addEventListener("click", async (event) => {
     event.preventDefault();
     if (hasUnsaved()) {
@@ -2175,7 +2116,7 @@ export async function renderNotebookEditor(root, ctx) {
 
   return () => {
     disposed = true;
-    destroyEditor();
+    destroyEditors();
     hideTooltip();
     tooltip.remove();
     root.removeEventListener("keydown", onKeydown);

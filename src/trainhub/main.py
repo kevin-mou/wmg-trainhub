@@ -11,7 +11,17 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__
-from .api import activity, admin, auth, datasets, health, notebooks, overview, runs
+from .api import (
+    activity,
+    admin,
+    auth,
+    datasets,
+    health,
+    notebooks,
+    overview,
+    runs,
+    storage as storage_api,
+)
 from .config import PROJECT_ROOT, Settings
 from .db import Database
 from .kernel_sessions import KernelSessionManager
@@ -89,7 +99,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.add_exception_handler(StarletteHTTPException, http_error_handler)
 
-    for module in (health, auth, overview, datasets, notebooks, runs, activity, admin):
+    for module in (health, auth, overview, datasets, notebooks, runs, storage_api, activity, admin):
         app.include_router(module.router)
 
     # 零构建 SPA 没有构建哈希：HTML/JS/CSS 必须每次重新验证，否则浏览器会

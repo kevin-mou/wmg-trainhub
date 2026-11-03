@@ -1,30 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import json
-from pathlib import Path
-
-import pytest
 
 from helpers import notebook_bytes, upload_dataset
-from trainhub.responses import ApiError
-
-
-class FakeSession:
-    """只实现数据集挂载所需的最小会话接口。"""
-
-    def __init__(self, dataset_dir: Path) -> None:
-        self.dataset_dir = dataset_dir
-        self.dataset_dir.mkdir(parents=True, exist_ok=True)
-        self.dataset_id: str | None = None
-        self.dataset_name: str | None = None
-        self.dataset_signature: str | None = None
-        self.dataset_lock = asyncio.Lock()
-        self.run_task = None
-        self.lock = asyncio.Lock()
-
-    def is_busy(self) -> bool:
-        return self.lock.locked()
 
 
 async def _create_notebook(client, headers) -> dict:
@@ -36,114 +14,164 @@ async def _create_notebook(client, headers) -> dict:
     return response.json()["data"]
 
 
-async def test_set_and_clear_notebook_dataset(client, headers):
+async def test_session_runtime_dataset_helper_resolves_own_and_shared(
+    client, app, db, customer, headers
+):
+    own = await upload_dataset(client, headers, name="own-runtime")
+    other = db.create_customer("Other Co", None, "trh_other_runtime_token_1234567890")
+    other_headers = {"Authorization": "Bearer trh_other_runtime_token_1234567890"}
+    shared = await upload_dataset(
+        client,
+        other_headers,
+        name="shared-runtime",
+        content=b"shared-runtime-ok",
+        shared=True,
+    )
     notebook = await _create_notebook(client, headers)
-    dataset = await upload_dataset(client, headers, name="train-set")
 
-    response = await client.put(
-        f"/api/notebooks/{notebook['id']}/dataset",
+    started = await client.post(
+        f"/api/notebooks/{notebook['id']}/sessions",
         headers=headers,
-        json={"datasetId": dataset["id"]},
+        json={"kernel": "python3"},
     )
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["datasetId"] == dataset["id"]
-
-    detail = await client.get(f"/api/notebooks/{notebook['id']}", headers=headers)
-    assert detail.json()["data"]["datasetId"] == dataset["id"]
-
-    cleared = await client.put(
-        f"/api/notebooks/{notebook['id']}/dataset",
-        headers=headers,
-        json={"datasetId": None},
+    assert started.status_code == 200, started.text
+    session = started.json()["data"]
+    shared_ref = f"{other['id']}/shared-runtime"
+    code = (
+        "import os\n"
+        "from trainhub_runtime import dataset_path, list_datasets\n"
+        "print('OWN=' + dataset_path('own-runtime'))\n"
+        f"print('SHARED=' + dataset_path('{shared_ref}'))\n"
+        "print('SHARED_DATA=' + open(os.path.join("
+        f"dataset_path('{shared_ref}'), 'a.txt')).read())\n"
+        "print('NAMES=' + ','.join(sorted(item['name'] for item in list_datasets())))\n"
+        "try:\n"
+        "    dataset_path()\n"
+        "except Exception as exc:\n"
+        "    print('NO_SELECTED=' + ('没有选中' in str(exc) and 'OK' or str(exc)))\n"
     )
-    assert cleared.status_code == 200
-    assert cleared.json()["data"]["datasetId"] is None
-
-
-async def test_notebook_dataset_visibility_rules(client, db, headers):
-    notebook = await _create_notebook(client, headers)
-    other_token = "trh_other_customer_token_1234567890"
-    other = db.create_customer("Other Co", "other@example.com", other_token)
-    other_headers = {"Authorization": f"Bearer {other_token}"}
-
-    private_dataset = await upload_dataset(client, other_headers, name="private-set")
-    denied = await client.put(
-        f"/api/notebooks/{notebook['id']}/dataset",
-        headers=headers,
-        json={"datasetId": private_dataset["id"]},
-    )
-    assert denied.status_code == 404
-
-    shared_dataset = await upload_dataset(client, other_headers, name="shared-set", shared=True)
-    allowed = await client.put(
-        f"/api/notebooks/{notebook['id']}/dataset",
-        headers=headers,
-        json={"datasetId": shared_dataset["id"]},
-    )
-    assert allowed.status_code == 200
-    assert allowed.json()["data"]["datasetId"] == shared_dataset["id"]
-
-    # 取消共享后，其他客户 Notebook 上的引用应被清除
-    unshare = await client.patch(
-        f"/api/datasets/{shared_dataset['id']}/sharing",
-        headers=other_headers,
-        json={"shared": False},
-    )
-    assert unshare.status_code == 200
-    detail = await client.get(f"/api/notebooks/{notebook['id']}", headers=headers)
-    assert detail.json()["data"]["datasetId"] is None
-
-
-async def test_delete_dataset_clears_notebook_reference(client, headers):
-    notebook = await _create_notebook(client, headers)
-    dataset = await upload_dataset(client, headers, name="to-delete")
-    await client.put(
-        f"/api/notebooks/{notebook['id']}/dataset",
-        headers=headers,
-        json={"datasetId": dataset["id"]},
-    )
-    deleted = await client.delete(f"/api/datasets/{dataset['id']}", headers=headers)
-    assert deleted.status_code == 200
-    detail = await client.get(f"/api/notebooks/{notebook['id']}", headers=headers)
-    assert detail.json()["data"]["datasetId"] is None
-
-
-async def test_session_dataset_mount_and_clear(client, app, db, customer, headers, tmp_path):
-    notebook = await _create_notebook(client, headers)
-    dataset = await upload_dataset(client, headers, name="mount-set")
-    db.set_notebook_dataset(customer["id"], notebook["id"], dataset["id"])
-    row = db.get_notebook(customer["id"], notebook["id"])
-    assert row is not None and row["dataset_id"] == dataset["id"]
-
-    manager = app.state.kernel_sessions
-    session = FakeSession(tmp_path / "dataset")
-    await manager._apply_dataset(session, customer["id"], row)
-
-    assert session.dataset_id == dataset["id"]
-    mount_dir = tmp_path / "dataset"
-    assert sorted(item.name for item in mount_dir.iterdir()) == ["a.txt"]
-    assert (mount_dir / "a.txt").read_bytes() == b"data-ok"
-
-    db.set_notebook_dataset(customer["id"], notebook["id"], None)
-    row = db.get_notebook(customer["id"], notebook["id"])
-    await manager._apply_dataset(session, customer["id"], row)
-    assert session.dataset_id is None
-    assert list(mount_dir.iterdir()) == []
-
-
-async def test_switch_dataset_rejected_while_running(client, app, db, customer, headers, tmp_path):
-    notebook = await _create_notebook(client, headers)
-    dataset = await upload_dataset(client, headers, name="busy-set")
-    db.set_notebook_dataset(customer["id"], notebook["id"], dataset["id"])
-    row = db.get_notebook(customer["id"], notebook["id"])
-    assert row is not None
-
-    manager = app.state.kernel_sessions
-    session = FakeSession(tmp_path / "dataset")
-    await session.lock.acquire()
     try:
-        with pytest.raises(ApiError) as exc:
-            await manager._apply_dataset(session, customer["id"], row)
-        assert exc.value.status_code == 409
+        executed = await client.post(
+            f"/api/notebooks/{notebook['id']}/sessions/{session['sessionId']}/execute",
+            headers=headers,
+            json={"code": code, "cellId": "c1"},
+        )
+        assert executed.status_code == 200, executed.text
+        result = executed.json()["data"]
+        assert result["status"] == "ok", result.get("message")
+        text = "".join(
+            item.get("text", "")
+            for item in result["outputs"]
+            if item.get("output_type") == "stream"
+        )
     finally:
-        session.lock.release()
+        await client.delete(
+            f"/api/notebooks/{notebook['id']}/sessions/{session['sessionId']}",
+            headers=headers,
+        )
+
+    storage = app.state.storage
+    own_dir = storage.dataset_files_dir(customer["id"], own["id"])
+    shared_dir = storage.dataset_files_dir(other["id"], shared["id"])
+    assert f"OWN={own_dir}" in text
+    assert f"SHARED={shared_dir}" in text
+    assert "SHARED_DATA=shared-runtime-ok" in text
+    assert "NAMES=own-runtime,shared-runtime" in text
+    assert "NO_SELECTED=OK" in text
+
+
+async def test_session_load_dataset_reads_shared_records(client, app, db, customer, headers):
+    other = db.create_customer("Data Co", None, "trh_other_load_token_1234567890")
+    other_headers = {"Authorization": "Bearer trh_other_load_token_1234567890"}
+    manifest = {
+        "name": "wmg-shared-records",
+        "artifacts": {
+            "train.jsonl": {"records": 2},
+            "test.jsonl": {"records": 1},
+        },
+    }
+    train_rows = (
+        '{"fields": {"subject": "a"}, "answers": {"email_type": "Ham", "motivation": "Reply"}}\n'
+        '{"fields": {"subject": "b"}, "answers": {"email_type": "Spam", "motivation": "Unknown"}}\n'
+    )
+    test_rows = '{"fields": {"subject": "c"}, "answers": {"email_type": "Phishing", "motivation": "Open attachment"}}\n'
+    uploaded = await client.post(
+        "/api/datasets",
+        headers=other_headers,
+        data={"name": "shared-records", "shared": "true"},
+        files=[
+            (
+                "files",
+                (
+                    "dataset_manifest.json",
+                    json.dumps(manifest).encode("utf-8"),
+                    "application/json",
+                ),
+            ),
+            (
+                "files",
+                (
+                    "groups.json",
+                    json.dumps({"train": ["g1", "g2"], "test": ["g3"]}).encode("utf-8"),
+                    "application/json",
+                ),
+            ),
+            (
+                "files",
+                ("train.jsonl", train_rows.encode("utf-8"), "application/x-ndjson"),
+            ),
+            (
+                "files",
+                ("test.jsonl", test_rows.encode("utf-8"), "application/x-ndjson"),
+            ),
+        ],
+    )
+    assert uploaded.status_code == 200, uploaded.text
+
+    notebook = await _create_notebook(client, headers)
+    started = await client.post(
+        f"/api/notebooks/{notebook['id']}/sessions",
+        headers=headers,
+        json={"kernel": "python3"},
+    )
+    assert started.status_code == 200, started.text
+    session = started.json()["data"]
+    shared_ref = f"{other['id']}/shared-records"
+    code = (
+        "from trainhub_runtime import load_dataset\n"
+        f"ds = load_dataset('{shared_ref}')\n"
+        "print('TRAIN=' + str(len(ds.train)))\n"
+        "print('TEST=' + str(len(ds.test)))\n"
+        "print('TYPE=' + ds.train[1]['answers']['email_type'])\n"
+        "print('GROUPS=' + ','.join(ds.groups['train']))\n"
+        "print('REF=' + ds.reference)\n"
+        "print('MANIFEST=' + ds.manifest['name'])\n"
+        "print('TRAIN_FILE=' + ds.files['train'].rsplit('/', 1)[-1])\n"
+    )
+    try:
+        executed = await client.post(
+            f"/api/notebooks/{notebook['id']}/sessions/{session['sessionId']}/execute",
+            headers=headers,
+            json={"code": code, "cellId": "c1"},
+        )
+        assert executed.status_code == 200, executed.text
+        result = executed.json()["data"]
+        assert result["status"] == "ok", result.get("message")
+        text = "".join(
+            item.get("text", "")
+            for item in result["outputs"]
+            if item.get("output_type") == "stream"
+        )
+    finally:
+        await client.delete(
+            f"/api/notebooks/{notebook['id']}/sessions/{session['sessionId']}",
+            headers=headers,
+        )
+
+    assert "TRAIN=2" in text
+    assert "TEST=1" in text
+    assert "TYPE=Spam" in text
+    assert "GROUPS=g1,g2" in text
+    assert f"REF={shared_ref}" in text
+    assert "MANIFEST=wmg-shared-records" in text
+    assert "TRAIN_FILE=train.jsonl" in text

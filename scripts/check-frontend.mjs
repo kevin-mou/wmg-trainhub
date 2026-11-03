@@ -39,6 +39,7 @@ const dynamicPrefixes = {
   "runs.filters.": ["all", "queued", "running", "succeeded", "failed", "cancelled"],
   "nav.": ["overview", "datasets", "notebooks", "runs", "activity", "account"],
   "notebooks.editor.": ["auto", "code", "markdown", "raw"],
+  "storage.category.": ["datasets", "notebooks", "runs", "other"],
 };
 
 for (const relative of files) {

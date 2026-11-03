@@ -61,7 +61,6 @@ def notebook_public(row: dict[str, Any]) -> dict[str, Any]:
         "filename": row["filename"],
         "sizeBytes": row.get("size_bytes", 0),
         "cellCount": row.get("cell_count", 0),
-        "datasetId": row.get("dataset_id"),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }

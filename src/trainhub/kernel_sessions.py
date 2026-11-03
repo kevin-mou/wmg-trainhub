@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .dataset_mount import sync_dataset_mount
+from .dataset_catalog import (
+    accessible_dataset_entries,
+    dataset_catalog_path,
+    write_dataset_catalog,
+)
 from .db import Database
 from .kernels import default_kernel_name, list_kernels
 from .responses import ApiError
@@ -39,18 +43,6 @@ def _utc_now() -> str:
 
 def source_digest(source: str) -> str:
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
-
-
-def dataset_signature(files: list[dict[str, Any]]) -> str:
-    """数据集文件清单指纹：解压/增删文件后让运行中的会话重新挂载。"""
-    digest = hashlib.sha256()
-    for item in sorted(files, key=lambda entry: str(entry.get("filename") or "")):
-        digest.update(
-            f"{item.get('filename')}:{item.get('size_bytes')}:"
-            f"{item.get('storage_path')}".encode("utf-8")
-        )
-        digest.update(b"\n")
-    return digest.hexdigest()
 
 
 def run_public(
@@ -191,12 +183,6 @@ class KernelSession:
         self.run_subscribers: set[asyncio.Queue] = set()
         # 事件单调序号：SSE 快照与增量去重用（快照带 lastEventSeq，更小的事件丢弃）
         self.run_event_seq = 0
-        # 会话级数据集挂载（WMG_DATASET_DIR）：切换数据集时整体替换
-        self.dataset_dir = self.base_dir / "work" / "dataset"
-        self.dataset_id: str | None = None
-        self.dataset_name: str | None = None
-        self.dataset_signature: str | None = None
-        self.dataset_lock = asyncio.Lock()
 
     @classmethod
     async def create(
@@ -209,8 +195,7 @@ class KernelSession:
         settings: Settings,
         storage: Storage,
         session_id: str,
-        dataset: dict[str, Any] | None = None,
-        dataset_files: list[dict[str, Any]] | None = None,
+        catalog_entries: list[dict[str, Any]] | None = None,
         sandbox: DockerSandbox | None = None,
     ) -> KernelSession:
         from jupyter_client import KernelManager
@@ -220,13 +205,9 @@ class KernelSession:
         work_dir = base_dir / "work"
         home_dir = base_dir / "home"
         tmp_dir = base_dir / "tmp"
-        dataset_dir = work_dir / "dataset"
         output_dir = work_dir / "output"
-        for directory in (work_dir, dataset_dir, output_dir, home_dir, tmp_dir):
+        for directory in (work_dir, output_dir, home_dir, tmp_dir):
             directory.mkdir(parents=True, exist_ok=True)
-
-        dataset_files = dataset_files or []
-        sync_dataset_mount(dataset_files, dataset_dir)
 
         env = host_base_env(settings)
         env.update(
@@ -235,9 +216,6 @@ class KernelSession:
                 "WMG_NOTEBOOK_NAME": notebook_name,
                 "WMG_SESSION_ID": session_id,
                 "WMG_WORK_DIR": str(work_dir),
-                "WMG_DATASET_DIR": str(dataset_dir),
-                "DATASET_DIR": str(dataset_dir),
-                "WMG_DATASET_NAME": dataset["name"] if dataset else "",
                 "WMG_OUTPUT_DIR": str(output_dir),
                 "OUTPUT_DIR": str(output_dir),
                 "WMG_PARAMS": "{}",
@@ -252,6 +230,12 @@ class KernelSession:
                 "PYTHONUNBUFFERED": "1",
             }
         )
+        if catalog_entries is not None:
+            try:
+                write_dataset_catalog(work_dir, customer_id=customer_id, entries=catalog_entries)
+            except OSError:
+                logger.warning("写入数据集清单失败", exc_info=True)
+            env["WMG_DATASET_CATALOG"] = str(dataset_catalog_path(work_dir))
         # 共享模型缓存 + 运行时助手（trainhub_runtime）：所有内核复用同一份模型缓存。
         env.update(kernel_runtime_env(settings, env))
 
@@ -270,10 +254,13 @@ class KernelSession:
                     network=settings.sandbox_network,
                 )
                 dataset_dirs: list[Path] = []
-                if dataset is not None:
-                    dataset_dirs.append(
-                        storage.dataset_files_dir(dataset["customer_id"], dataset["id"])
-                    )
+                if catalog_entries is not None:
+                    # 清单里的目录就是 trainhub_runtime.load_dataset/dataset_path 返回的路径：
+                    # 自有数据集与共享数据集都按各自所有者挂载，缺一不可。
+                    for entry in catalog_entries:
+                        directory = Path(str(entry.get("dir") or ""))
+                        if directory.is_absolute():
+                            dataset_dirs.append(directory)
                 spec = SandboxSpec(
                     name=sandbox.container_name("session", session_id),
                     kind="session",
@@ -341,9 +328,6 @@ class KernelSession:
             km=km,
             client=client,
         )
-        session.dataset_id = dataset["id"] if dataset else None
-        session.dataset_name = dataset["name"] if dataset else None
-        session.dataset_signature = dataset_signature(dataset_files) if dataset else None
         return session
 
     def info(self) -> dict[str, Any]:
@@ -381,9 +365,7 @@ class KernelSession:
             self.last_used = time.monotonic()
             self.lock.release()
 
-    def _record_execution(
-        self, cell_id: str | None, source: str, result: dict[str, Any]
-    ) -> None:
+    def _record_execution(self, cell_id: str | None, source: str, result: dict[str, Any]) -> None:
         if not cell_id:
             return
         if result.get("status") == "ok":
@@ -413,9 +395,7 @@ class KernelSession:
             raise ApiError("该 Notebook 的单元格正在运行，请稍后再试", 409) from exc
         results: list[dict[str, Any]] = []
         try:
-            for item in plan_execution(
-                cells, self.executed, force_cell_id, force_all=force_all
-            ):
+            for item in plan_execution(cells, self.executed, force_cell_id, force_all=force_all):
                 if item["skip"]:
                     results.append(
                         {
@@ -702,9 +682,7 @@ class KernelSession:
             self.run_task = None
             raise
         try:
-            plan = plan_execution(
-                cells, self.executed, force_cell_id, force_all=force_all
-            )
+            plan = plan_execution(cells, self.executed, force_cell_id, force_all=force_all)
             run["cells"] = [
                 {
                     "cellId": item["cellId"],
@@ -723,7 +701,8 @@ class KernelSession:
                 """把输出变化折算成最小增量事件（stream 只发新增文本）。"""
                 cell_id = entry.get("cellId") or ""
                 prev = snapshots.setdefault(
-                    cell_id, {"count": 0, "last_type": None, "last_stream": "", "executionCount": None}
+                    cell_id,
+                    {"count": 0, "last_type": None, "last_stream": "", "executionCount": None},
                 )
                 events: list[dict[str, Any]] = []
                 if count is not None and count != prev["executionCount"]:
@@ -742,10 +721,7 @@ class KernelSession:
                 elif len(outputs) == prev["count"]:
                     if outputs:
                         last = outputs[-1]
-                        if (
-                            last.get("output_type") == "stream"
-                            and prev["last_type"] == "stream"
-                        ):
+                        if last.get("output_type") == "stream" and prev["last_type"] == "stream":
                             text = str(last.get("text") or "")
                             old_text = prev["last_stream"]
                             if text.startswith(old_text):
@@ -753,7 +729,7 @@ class KernelSession:
                                     delta = {
                                         "e": "stream",
                                         "name": last.get("name") or "stdout",
-                                        "text": text[len(old_text):],
+                                        "text": text[len(old_text) :],
                                     }
                             else:
                                 delta = {"e": "outputs", "outputs": outputs}
@@ -770,15 +746,14 @@ class KernelSession:
                     last = outputs[-1]
                     prev["last_type"] = last.get("output_type")
                     prev["last_stream"] = (
-                        str(last.get("text") or "")
-                        if last.get("output_type") == "stream"
-                        else ""
+                        str(last.get("text") or "") if last.get("output_type") == "stream" else ""
                     )
                 else:
                     prev["last_type"] = None
                     prev["last_stream"] = ""
                 for event in events:
                     self.publish_run(event)
+
             failed: dict[str, Any] | None = None
             for entry, item in zip(run["cells"], plan):
                 if item["skip"]:
@@ -930,22 +905,25 @@ class KernelSessionManager:
         for session in sessions:
             await session.close()
 
-    def _notebook_dataset(
-        self, customer_id: str, notebook: dict[str, Any]
-    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-        dataset_id = (notebook.get("dataset_id") or "").strip() or None
-        if not dataset_id or self._db is None:
-            return None, []
-        dataset = self._db.get_accessible_dataset(customer_id, dataset_id)
-        if dataset is None:
-            logger.warning(
-                "Notebook 数据集不可用，已清除选择：notebook=%s dataset=%s",
-                notebook["id"],
-                dataset_id,
-            )
-            self._db.set_notebook_dataset(customer_id, notebook["id"], None)
-            return None, []
-        return dataset, self._db.get_dataset_files(dataset["id"])
+    def _dataset_catalog_entries(self, customer_id: str) -> list[dict[str, Any]] | None:
+        if self._db is None:
+            return None
+        return accessible_dataset_entries(self._db, self._storage, customer_id)
+
+    def _sync_dataset_catalog(self, session: KernelSession, customer_id: str) -> None:
+        """主机模式刷新数据集清单（Docker 模式下挂载固定，清单随内核创建一次）。"""
+        if getattr(self._settings, "sandbox_mode", "none") == "docker":
+            return
+        base_dir = getattr(session, "base_dir", None)
+        if base_dir is None:
+            return
+        entries = self._dataset_catalog_entries(customer_id)
+        if entries is None:
+            return
+        try:
+            write_dataset_catalog(Path(base_dir) / "work", customer_id=customer_id, entries=entries)
+        except OSError:
+            logger.warning("刷新数据集清单失败", exc_info=True)
 
     async def ensure_session(
         self,
@@ -955,24 +933,14 @@ class KernelSessionManager:
         kernel_name: str | None = None,
     ) -> dict[str, Any]:
         key = (customer["id"], notebook["id"])
-        dataset, dataset_files = self._notebook_dataset(customer["id"], notebook)
-        desired_dataset_id = dataset["id"] if dataset else None
+        catalog_entries = self._dataset_catalog_entries(customer["id"])
         async with self._lock:
             existing = self._sessions.get(key)
             if existing is not None and existing.is_alive():
-                if getattr(self._settings, "sandbox_mode", "none") != "docker" or (
-                    existing.dataset_id == desired_dataset_id
-                ):
-                    return existing.info()
-                busy = bool(
-                    (existing.run_task is not None and not existing.run_task.done())
-                    or existing.lock.locked()
-                )
-                if busy:
-                    raise ApiError("该 Notebook 的单元格正在运行，请稍后再试", 409)
-                self._sessions.pop(key, None)
-                await existing.close()
-            elif existing is not None:
+                # 本机模式下刷新清单，运行期间新上传/新共享的数据集立即可见。
+                self._sync_dataset_catalog(existing, customer["id"])
+                return existing.info()
+            if existing is not None:
                 self._sessions.pop(key, None)
                 await existing.close()
 
@@ -993,133 +961,11 @@ class KernelSessionManager:
                 settings=self._settings,
                 storage=self._storage,
                 session_id=session_id,
-                dataset=dataset,
-                dataset_files=dataset_files,
+                catalog_entries=catalog_entries,
                 sandbox=self._sandbox,
             )
             self._sessions[key] = session
             return session.info()
-
-    def _notebook(self, customer_id: str, notebook_id: str) -> dict[str, Any]:
-        # 单测会用 db=None 构造 manager（只测内核行为）；此时不查 Notebook。
-        if self._db is None:
-            return {"id": notebook_id}
-        notebook = self._db.get_notebook(customer_id, notebook_id)
-        if notebook is None:
-            raise ApiError("Notebook 不存在", 404)
-        return notebook
-
-    def dataset_busy(self, *, customer_id: str, notebook_id: str) -> bool:
-        """会话是否正在执行（执行中不允许切换数据集）。"""
-        session = self._sessions.get((customer_id, notebook_id))
-        if session is None:
-            return False
-        return bool(
-            (session.run_task is not None and not session.run_task.done()) or session.lock.locked()
-        )
-
-    async def refresh_dataset(self, *, customer_id: str, notebook_id: str) -> None:
-        """Notebook 的数据集选择变化后，把已有会话的挂载同步过去。
-
-        没有会话时什么都不做（下次运行/启动会话时挂载）；执行中的会话保持原挂载，
-        新选择在下次运行时生效。
-        """
-        session = self._sessions.get((customer_id, notebook_id))
-        if session is None:
-            return
-        if getattr(self._settings, "sandbox_mode", "none") == "docker":
-            # 容器挂载在创建时固定；新数据集会在下次 ensure_session 时重建内核。
-            return
-        if self._db is None:
-            return
-        notebook = self._db.get_notebook(customer_id, notebook_id)
-        if notebook is None:
-            return
-        await self._apply_dataset(session, customer_id, notebook, raise_if_busy=False)
-
-    async def _apply_dataset(
-        self,
-        session: KernelSession,
-        customer_id: str,
-        notebook: dict[str, Any],
-        *,
-        raise_if_busy: bool = True,
-    ) -> None:
-        dataset_id = (notebook.get("dataset_id") or "").strip() or None
-        if (
-            getattr(self._settings, "sandbox_mode", "none") == "docker"
-            and session.dataset_id != dataset_id
-        ):
-            raise ApiError("Docker 隔离模式下切换数据集需要重新启动内核，请重新运行", 409)
-        dataset = None
-        files: list[dict[str, Any]] = []
-        if dataset_id:
-            dataset = self._db.get_accessible_dataset(customer_id, dataset_id)
-            if dataset is None:
-                logger.warning(
-                    "Notebook 数据集不可用，已清除选择：notebook=%s dataset=%s",
-                    notebook["id"],
-                    dataset_id,
-                )
-                self._db.set_notebook_dataset(customer_id, notebook["id"], None)
-                dataset_id = None
-            else:
-                files = self._db.get_dataset_files(dataset_id)
-        signature = dataset_signature(files) if dataset_id else None
-        if (
-            session.dataset_id == dataset_id
-            and session.dataset_signature == signature
-            and session.dataset_dir.is_dir()
-        ):
-            return
-
-        def busy() -> bool:
-            return bool(
-                (session.run_task is not None and not session.run_task.done())
-                or session.lock.locked()
-            )
-
-        if busy():
-            if raise_if_busy:
-                raise ApiError("该 Notebook 正在运行，请结束后再切换数据集", 409)
-            return
-        async with session.dataset_lock:
-            if (
-                session.dataset_id == dataset_id
-                and session.dataset_signature == signature
-                and session.dataset_dir.is_dir()
-            ):
-                return
-            if busy():
-                if raise_if_busy:
-                    raise ApiError("该 Notebook 正在运行，请结束后再切换数据集", 409)
-                return
-            # 等锁期间数据集可能被解压/删除，重新取一次清单。
-            dataset = None
-            files = []
-            if dataset_id:
-                dataset = self._db.get_accessible_dataset(customer_id, dataset_id)
-                if dataset is None:
-                    dataset_id = None
-                else:
-                    files = self._db.get_dataset_files(dataset_id)
-            signature = dataset_signature(files) if dataset_id else None
-            linked, missing = await asyncio.to_thread(
-                sync_dataset_mount, files, session.dataset_dir
-            )
-            session.dataset_id = dataset_id
-            session.dataset_name = dataset["name"] if dataset else None
-            session.dataset_signature = signature
-            if dataset is not None:
-                logger.info(
-                    "Notebook 数据集已挂载：notebook=%s dataset=%s files=%s missing=%s",
-                    notebook["id"],
-                    dataset_id,
-                    linked,
-                    len(missing),
-                )
-                for name in missing:
-                    logger.warning("数据集文件缺失或无法挂载：%s", name)
 
     async def execute(
         self,
@@ -1139,8 +985,7 @@ class KernelSessionManager:
                 customer_id=customer_id, notebook_id=notebook_id, session_id=session_id
             )
             raise ApiError("Notebook 内核会话已停止，请重新运行单元格", 404)
-        notebook = self._notebook(customer_id, notebook_id)
-        await self._apply_dataset(session, customer_id, notebook)
+        self._sync_dataset_catalog(session, customer_id)
         timeout = int(timeout_seconds or self._settings.kernel_cell_timeout_seconds or 300)
         timeout = max(1, min(timeout, 3600))
         return await session.execute(code, timeout, cell_id=cell_id)
@@ -1164,8 +1009,7 @@ class KernelSessionManager:
                 customer_id=customer_id, notebook_id=notebook_id, session_id=session_id
             )
             raise ApiError("Notebook 内核会话已停止，请重新运行单元格", 404)
-        notebook = self._notebook(customer_id, notebook_id)
-        await self._apply_dataset(session, customer_id, notebook)
+        self._sync_dataset_catalog(session, customer_id)
         timeout = int(timeout_seconds or self._settings.kernel_cell_timeout_seconds or 300)
         timeout = max(1, min(timeout, 3600))
         results = await session.execute_sequence(cells, timeout, force_cell_id=target_cell_id)
@@ -1204,8 +1048,7 @@ class KernelSessionManager:
             raise ApiError("该 Notebook 的单元格正在运行，请稍后再试", 409)
         if session.lock.locked():
             raise ApiError("该 Notebook 的单元格正在运行，请稍后再试", 409)
-        notebook = self._notebook(customer_id, notebook_id)
-        await self._apply_dataset(session, customer_id, notebook)
+        self._sync_dataset_catalog(session, customer_id)
         timeout = int(timeout_seconds or self._settings.kernel_cell_timeout_seconds or 300)
         timeout = max(1, min(timeout, 3600))
         run = session.start_run(
@@ -1232,9 +1075,7 @@ class KernelSessionManager:
             event_seq=session.run_event_seq,
         )
 
-    def get_session(
-        self, *, customer_id: str, notebook_id: str
-    ) -> KernelSession | None:
+    def get_session(self, *, customer_id: str, notebook_id: str) -> KernelSession | None:
         return self._sessions.get((customer_id, notebook_id))
 
     async def restart_session(
@@ -1267,9 +1108,7 @@ class KernelSessionManager:
         key = (customer_id, notebook_id)
         async with self._lock:
             session = self._sessions.get(key)
-            if session is None or (
-                not force and session_id and session.session_id != session_id
-            ):
+            if session is None or (not force and session_id and session.session_id != session_id):
                 return
             self._sessions.pop(key, None)
         await session.close()

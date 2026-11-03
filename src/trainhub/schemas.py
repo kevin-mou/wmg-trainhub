@@ -88,12 +88,6 @@ class NotebookSessionStart(BaseModel):
     kernel: str | None = Field(default=None, max_length=64)
 
 
-class NotebookDatasetUpdate(BaseModel):
-    """为 Notebook 选择随会话挂载的数据集；null 表示不使用数据集。"""
-
-    datasetId: str | None = Field(default=None, max_length=64)
-
-
 class NotebookCellExecute(BaseModel):
     """在 Notebook 内核中执行一个代码单元。"""
 

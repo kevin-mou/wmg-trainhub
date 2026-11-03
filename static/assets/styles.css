@@ -975,6 +975,22 @@ button {
   border-right: none;
 }
 
+.ledger-item-nav {
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--line);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.ledger-item-nav:hover {
+  background: color-mix(in srgb, var(--brass) 6%, transparent);
+}
+
 .ledger-value {
   font-size: 25px;
   font-weight: 600;
@@ -998,6 +1014,23 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.storage-share {
+  display: inline-block;
+  width: 90px;
+  height: 6px;
+  margin-right: 8px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.storage-share span {
+  display: block;
+  height: 100%;
+  background: var(--brass);
 }
 
 /* ---------------------------------------------------------- tables */
@@ -1220,34 +1253,6 @@ button {
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
-}
-
-.nb-editor-dataset {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--ink-2);
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.nb-editor-dataset select {
-  height: 28px;
-  max-width: 280px;
-  padding: 0 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--ink);
-  font-family: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.nb-editor-dataset select:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
 }
 
 .nb-cell-type-group {
@@ -1571,7 +1576,8 @@ button {
   transition: opacity 0.12s ease, visibility 0.12s ease;
 }
 
-.nb-cell.editing .nb-cell-head-actions {
+.nb-cell.editing .nb-cell-head-actions,
+.nb-cell:focus-within .nb-cell-head-actions {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
@@ -3453,15 +3459,6 @@ dialog::backdrop {
 
   .nb-toolbar-actions {
     width: 100%;
-  }
-
-  .nb-editor-dataset {
-    width: 100%;
-  }
-
-  .nb-editor-dataset select {
-    flex: 1;
-    max-width: none;
   }
 
   .nb-editor-layout {

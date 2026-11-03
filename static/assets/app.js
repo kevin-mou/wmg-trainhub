@@ -10,12 +10,14 @@ import { renderNotebookEditor } from "./pages/notebook-editor.js";
 import { renderOverview } from "./pages/overview.js";
 import { renderRunDetail } from "./pages/run-detail.js";
 import { renderRuns } from "./pages/runs.js";
+import { renderStorage } from "./pages/storage.js";
 
 const NAV_ITEMS = [
   { name: "overview", path: "/overview", icon: "overview", label: "nav.overview" },
   { name: "datasets", path: "/datasets", icon: "datasets", label: "nav.datasets" },
   { name: "notebooks", path: "/notebooks", icon: "notebooks", label: "nav.notebooks" },
   { name: "runs", path: "/runs", icon: "runs", label: "nav.runs" },
+  { name: "storage", path: "/storage", icon: "storage", label: "nav.storage" },
   { name: "activity", path: "/activity", icon: "activity", label: "nav.activity" },
   { name: "account", path: "/account", icon: "account", label: "nav.account" },
 ];
@@ -45,6 +47,7 @@ const ROUTES = [
     label: "nav.runs",
     param: "id",
   },
+  { name: "storage", re: /^\/storage\/?$/, loader: renderStorage, label: "nav.storage" },
   { name: "activity", re: /^\/activity\/?$/, loader: renderActivity, label: "nav.activity" },
   { name: "account", re: /^\/account\/?$/, loader: renderAccount, label: "nav.account" },
 ];

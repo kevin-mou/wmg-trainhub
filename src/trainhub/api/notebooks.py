@@ -13,7 +13,6 @@ from ..db import Database
 from ..responses import ApiError, ok, page_data
 from ..schemas import (
     NotebookCellExecute,
-    NotebookDatasetUpdate,
     NotebookExecuteUpto,
     NotebookRunStart,
     NotebookSessionStart,
@@ -31,7 +30,6 @@ from ..services import (
     notebook_session_get,
     notebook_session_save,
     update_notebook,
-    update_notebook_dataset,
 )
 from ..storage import Storage
 from .deps import client_ip, current_customer, get_db, get_settings, get_storage
@@ -423,29 +421,6 @@ def save_notebook_session(
         cells=payload.cells,
     )
     return ok(result, message="会话已保存")
-
-
-@router.put("/{notebook_id}/dataset")
-async def set_notebook_dataset(
-    request: Request,
-    notebook_id: str,
-    payload: NotebookDatasetUpdate,
-    customer: dict = Depends(current_customer),
-    db: Database = Depends(get_db),
-) -> dict:
-    """为 Notebook 选择交互式会话挂载的数据集（null = 不使用）。"""
-    _owned_notebook(db, customer, notebook_id)
-    manager = request.app.state.kernel_sessions
-    if manager.dataset_busy(customer_id=customer["id"], notebook_id=notebook_id):
-        raise ApiError("该 Notebook 正在运行，请结束后再切换数据集", 409)
-    notebook = update_notebook_dataset(
-        db=db,
-        customer=customer,
-        notebook_id=notebook_id,
-        dataset_id=payload.datasetId,
-    )
-    await manager.refresh_dataset(customer_id=customer["id"], notebook_id=notebook_id)
-    return ok(notebook_public(notebook), message="数据集已更新")
 
 
 @router.put("/{notebook_id}")

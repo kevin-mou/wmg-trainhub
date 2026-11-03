@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import re
 import time
 import zipfile
 
@@ -103,6 +104,35 @@ async def test_platform_execution_bundle_runs_and_reports(client):
     paths = [item["path"] for item in outputs.json()["data"]["outputs"]["files"]]
     assert "checkpoint.txt" in paths
     assert "trainhub_result.json" in paths
+
+
+async def test_platform_execution_dataset_helper_reads_pushed_bundle(client):
+    source = (
+        "import os\n"
+        "from trainhub_runtime import dataset_path, list_datasets\n"
+        "print('HELPER=' + dataset_path('platform-set'))\n"
+        "print('CURRENT=' + dataset_path())\n"
+        "print('DATA=' + open(os.path.join(dataset_path('platform-set'), 'a.txt')).read())\n"
+        "print('NAMES=' + ','.join(item['name'] for item in list_datasets()))\n"
+    )
+    run = await _submit(
+        client,
+        _code_bundle(source),
+        _zip({"a.txt": b"plat-runtime"}),
+        datasetName="platform-set",
+    )
+    final = await _wait_admin(client, run["id"])
+    assert final["status"] == "succeeded", final.get("message")
+    logs = await client.get(f"/api/admin/runs/{run['id']}/logs", headers=ADMIN)
+    text = logs.text
+    assert "DATA=plat-runtime" in text
+    assert "NAMES=platform-set" in text
+
+    helper = re.search(r"HELPER=(\S+)", text)
+    current = re.search(r"CURRENT=(\S+)", text)
+    assert helper and current
+    assert helper.group(1) == current.group(1)
+    assert helper.group(1).endswith("/work/dataset")
 
 
 async def test_admin_customer_can_use_explicit_token(client):

@@ -544,29 +544,6 @@ def delete_notebook(
     )
 
 
-def update_notebook_dataset(
-    *,
-    db: Database,
-    customer: dict[str, Any],
-    notebook_id: str,
-    dataset_id: str | None,
-) -> dict[str, Any]:
-    """为 Notebook 选择随交互式会话挂载的数据集（服务端校验可见性）。"""
-    notebook = db.get_notebook(customer["id"], notebook_id)
-    if notebook is None:
-        raise ApiError("Notebook 不存在", 404)
-    normalized = (dataset_id or "").strip() or None
-    if normalized:
-        dataset = db.get_accessible_dataset(customer["id"], normalized)
-        if dataset is None:
-            raise ApiError("数据集不存在或不可用", 404)
-        normalized = dataset["id"]
-    updated = db.set_notebook_dataset(customer["id"], notebook_id, normalized)
-    if updated is None:
-        raise ApiError("Notebook 不存在", 404)
-    return updated
-
-
 def notebook_download(
     *, db: Database, customer: dict[str, Any], notebook_id: str
 ) -> tuple[bytes, str]:

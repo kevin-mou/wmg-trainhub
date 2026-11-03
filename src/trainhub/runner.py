@@ -15,6 +15,12 @@ from types import SimpleNamespace
 from typing import Any
 
 from .config import Settings
+from .dataset_catalog import (
+    accessible_dataset_entries,
+    dataset_catalog_path,
+    dataset_entry,
+    write_dataset_catalog,
+)
 from .dataset_mount import sync_dataset_mount
 from .db import Database
 from .environment import environment_snapshot
@@ -395,7 +401,7 @@ class RunExecutor:
                             except OSError:
                                 pass
                 else:
-                    writer.line("数据集：未提供")
+                    writer.line("数据集：未随任务上传（由脚本按名称从节点 hub 加载）")
                 if run.get("assets_archive_path"):
                     assets_dir = workdir / "assets"
                     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -420,6 +426,12 @@ class RunExecutor:
                 exec_cwd = workdir
 
                 self._link_dataset(run.get("dataset_id"), workdir / "dataset", writer)
+
+            catalog_entries = self._dataset_catalog_entries(run, workdir)
+            try:
+                write_dataset_catalog(workdir, customer_id=customer_id, entries=catalog_entries)
+            except OSError:
+                logger.warning("写入数据集清单失败", exc_info=True)
 
             kernel = self._resolve_kernel(run)
             writer.line(f"内核：{kernel or 'Jupyter 默认'}")
@@ -472,12 +484,18 @@ class RunExecutor:
             if getattr(self._settings, "sandbox_mode", "none") == "docker":
                 self._sandbox.ensure_available()
                 dataset_dirs: list[Path] = []
-                if not bundle_mode and run.get("dataset_id"):
-                    dataset = self._db.get_accessible_dataset(run["customer_id"], run["dataset_id"])
-                    if dataset is not None:
-                        dataset_dirs.append(
-                            self._storage.dataset_files_dir(dataset["customer_id"], dataset["id"])
-                        )
+                work_root = workdir.resolve()
+                for entry in catalog_entries:
+                    # 清单里的每个目录都要挂进容器：load_dataset 可能返回任一条目，
+                    # 共享数据集的目录属于其他客户，不能按当前客户 ID 推导。
+                    # 落在 work 目录内的（平台任务随任务上传的数据集）已随 work 挂载。
+                    directory = Path(str(entry.get("dir") or ""))
+                    if not directory.is_absolute():
+                        continue
+                    try:
+                        directory.resolve().relative_to(work_root)
+                    except ValueError:
+                        dataset_dirs.append(directory)
                 ipc_dir = self._sandbox.new_ipc_dir()
                 sandbox_environment = sandbox_env(
                     self._settings,
@@ -651,6 +669,47 @@ class RunExecutor:
             writer.line(f"警告：数据集文件缺失或无法挂载 {name}")
         writer.line(f"数据集已挂载：{linked}/{len(files)} 个文件 → work/dataset")
 
+    def _dataset_catalog_entries(self, run: dict[str, Any], workdir: Path) -> list[dict[str, Any]]:
+        """本次执行可见的数据集清单（trainhub_runtime.load_dataset 的数据源）。
+
+        - 随任务上传了数据集归档（仅通用 Admin API 入口显式传入时）：只暴露这一份；
+        - 否则（训练与受控评估都只提交代码）：暴露当前客户可见的全部数据集（自有 + 共享），
+          路径按数据集所有者解析，避免用当前客户 ID 拼路径；脚本/评估器按 hub 数据集名
+          （``<name>@v<version>``）用 ``trainhub_runtime.load_dataset`` 读取。
+        """
+        customer_id = run["customer_id"]
+        if run.get("dataset_archive_path"):
+            return [
+                dataset_entry(
+                    name=(run.get("dataset_name") or "").strip() or "dataset",
+                    directory=workdir / "dataset",
+                    owner_id=customer_id,
+                    selected=True,
+                )
+            ]
+
+        selected_id = (run.get("dataset_id") or "").strip() or None
+        entries = accessible_dataset_entries(
+            self._db, self._storage, customer_id, selected_id=selected_id
+        )
+        if selected_id and not any(entry.get("dataset_id") == selected_id for entry in entries):
+            # 提交后所有者取消共享：任务按提交时的快照继续执行，路径仍取所有者目录。
+            owner_id = (run.get("dataset_owner_id") or "").strip() or customer_id
+            directory = self._storage.dataset_files_dir(owner_id, selected_id)
+            if directory.is_dir():
+                entries.append(
+                    dataset_entry(
+                        name=(run.get("dataset_name") or "").strip() or selected_id,
+                        directory=directory,
+                        dataset_id=selected_id,
+                        owner_id=owner_id,
+                        owner_name=run.get("dataset_owner_name") or "",
+                        shared=owner_id != customer_id,
+                        selected=True,
+                    )
+                )
+        return entries
+
     def _resolve_kernel(self, run: dict[str, Any]) -> str | None:
         """任务显式指定时校验；未指定则返回 None，交给 Jupyter 决定。"""
         requested = str(run.get("kernel") or "").strip()
@@ -694,6 +753,8 @@ class RunExecutor:
                 "WMG_CUSTOMER_ID": run["customer_id"],
                 "WMG_NOTEBOOK_NAME": run.get("notebook_name") or "",
                 "WMG_DATASET_NAME": run.get("dataset_name") or "",
+                "WMG_DATASET_ID": run.get("dataset_id") or "",
+                "WMG_DATASET_CATALOG": str(dataset_catalog_path(workdir)),
                 "WMG_DATASET_DIR": str(workdir / "dataset"),
                 "DATASET_DIR": str(workdir / "dataset"),
                 "WMG_OUTPUT_DIR": str(output_dir),

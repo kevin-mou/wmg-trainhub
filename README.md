@@ -155,7 +155,7 @@ FastAPI（单实例，uvicorn 单 worker）
 - 平台到 TrainHub 之间会传输管理令牌（请求头）与客户令牌明文（创建/重置响应），请使用 HTTPS 或把节点限制在受控内网；平台侧的 `TRAINHUB_VERIFY_TLS=false` 只用于自签证书测试环境。
 - 上传上限：`TRAINHUB_MAX_DATASET_MB` / `TRAINHUB_MAX_NOTEBOOK_MB` / `TRAINHUB_MAX_CODE_MB` / `TRAINHUB_MAX_ASSETS_MB`；日志上限 `TRAINHUB_MAX_LOG_MB`。接口层未做请求频率限制，公网部署应在反向代理上限制速率与并发。
 - 下载路径做了穿越校验；ZIP 打包不跟随符号链接，避免产物把节点上的外部文件打包出去。
-- **执行隔离（2026-11-01）**：Linux 节点默认启用 Docker 沙箱（`TRAINHUB_SANDBOX=docker`）：每个交互式内核/训练任务一个临时容器，非 root、只读根文件系统、`cap-drop ALL`、`no-new-privileges`、CPU/内存/PID 限制、默认 `--network none`；只挂载会话 `work`/`home`/IPC、选中的数据集（只读）、共享模型缓存（默认只读）和 `trainhub_runtime`（只读），不挂 `.env`、数据库、代码仓库或 Docker socket。容器结束即删除，启动时按标签清理遗留容器。
+- **执行隔离（2026-11-01）**：Linux 节点默认启用 Docker 沙箱（`TRAINHUB_SANDBOX=docker`）：每个交互式内核/训练任务一个临时容器，非 root、只读根文件系统、`cap-drop ALL`、`no-new-privileges`、CPU/内存/PID 限制、默认 `--network none`；只挂载会话 `work`/`home`/IPC、当前客户可见的数据集（自有 + 共享，只读）、共享模型缓存（默认只读）和 `trainhub_runtime`（只读），不挂 `.env`、数据库、代码仓库或 Docker socket。容器结束即删除，启动时按标签清理遗留容器。
 - **macOS/MLX 节点不能使用 Docker 沙箱**：Docker 在 macOS 上是 Linux 容器，MLX 依赖 macOS/Metal，无法运行；macOS 节点必须 `TRAINHUB_SANDBOX=none`，只适合可信客户/专用设备。
 - **`none` 模式仍然是同用户子进程**，不是安全边界；本机内核已改为**最小环境白名单**（不再整份继承 `os.environ`，默认不传 `TRAINHUB_ADMIN_TOKEN`、`HF_TOKEN`、数据库/云凭据等），但这只能降低误泄，不能阻止同用户读取 `.env`/SQLite/其他客户目录。
 - `TRAINHUB_SANDBOX_RUN_AS` 默认服务用户的 `uid:gid`；服务不能以 root 运行 Docker 沙箱。Docker 组本身等价于 root 权限，生产建议 rootless Docker/Podman，并把 7470 限制在受控网络。
@@ -212,6 +212,7 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli serve --host 127.0.0.1 --port 74
 - **数据集**：上传多文件或整个目录（保留相对路径，自动去掉共同顶层目录）；ZIP 可一键解压为目录内容；点击数据集名称查看文件清单（相对路径与大小）；默认私有；所有者可以共享/取消共享、下载、删除。
 - **Notebooks**：**新建 Notebook 默认进入手动编辑器**；也可以点击「导入 .ipynb」导入已有文件。支持下载（纯脚本 `.ipynb`，会自动挂载最新且代码匹配的 Session 快照输出）、编辑、删除（有活动任务时返回 `409`）。
 - **训练任务**：提交、查看、取消、删除运行。
+- **存储**：客户目录占用、磁盘可用空间，以及数据集 / Notebooks / 训练任务占用明细（点击概览的存储统计也进入此页）。
 - **活动记录**：上传、提交、编辑、下载、删除等操作审计。
 - **账户**：客户资料、令牌脱敏展示、语言/主题切换。
 
@@ -220,10 +221,10 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli serve --host 127.0.0.1 --port 74
 「Notebooks」页面的主按钮是「新建 Notebook」，点击进入手动编辑器：
 
 - 默认带一个自动识别类型的空单元；可以添加代码、描述（Markdown）、原始（raw）单元。
-- 每个单元是独立编辑器：**非编辑态显示预览**（Markdown 渲染、代码纯文本），点击预览进入编辑态；失焦后回到预览。Markdown 预览按普通文档排版，不显示 cell 卡片背景、边框和头部标题。
-- 代码单元使用 **CodeMirror 6**（Python/Markdown 语法高亮、行内换行、撤销/重做）；非编辑态的代码预览也使用同一 Python 解析器做只读语法高亮。Markdown 预览由 marked + DOMPurify 渲染，原始 HTML/SVG 会被清理。
+- 每个单元是独立编辑器：**代码单元常驻编辑态**（打开即为可编辑的编辑器，点击直接定位光标，不再先渲染只读预览再切换，避免进入编辑时闪烁与滚动跳动）；Markdown / raw 单元显示预览，点击预览进入编辑态、失焦后回到预览。Markdown 预览按普通文档排版，不显示 cell 卡片背景、边框和头部标题。
+- 代码单元使用 **CodeMirror 6**（Python/Markdown 语法高亮、代码单元行号、行内换行、撤销/重做）；编辑器模块加载失败时整体回落为只读纯文本预览。Markdown 预览由 marked + DOMPurify 渲染，原始 HTML/SVG 会被清理。
 - 单元类型默认为「自动」，按内容判断 code / markdown / raw，也可以随时手动切换。
-- 编辑器顶部（名称下方）保留精简工具栏：**运行**（按顺序运行全部代码单元格）、重启内核（清空变量与导入状态）、下载（`.py`/`.md`/`.txt`）；工具栏最右侧是 Kaggle 风格的运行状态标签（`编辑中` / `运行中`）。每个 cell 最左侧的 prompt 槽位显示 `[cell序号]`；选中/聚焦代码单元时，序号下方出现运行按钮（运行本格，前置未执行或已修改时自动补跑）。cell 头部左侧是类型切换下拉；进入编辑态时头部右侧显示六个快捷操作：下方插入、上方插入、上移、下移、复制、删除。Markdown 预览不显示头部，需要点击进入编辑后才能切换类型。工具栏在页面滚动时吸顶在顶部栏下方，按钮 tooltip 会跟随视口避让并在窄屏自动换行。工具栏还包含**数据集选择**：选中结果持久化到该 Notebook，运行单元格时挂载到 `WMG_DATASET_DIR`（运行中不可切换，数据集支持目录结构）。
+- 编辑器顶部（名称下方）保留精简工具栏：**运行**（按顺序运行全部代码单元格）、重启内核（清空变量与导入状态）、下载（`.py`/`.md`/`.txt`）；工具栏最右侧是 Kaggle 风格的运行状态标签（`编辑中` / `运行中`）。每个 cell 最左侧的 prompt 槽位显示 `[cell序号]`；选中/聚焦代码单元时，序号下方出现运行按钮（运行本格，前置未执行或已修改时自动补跑）。cell 头部左侧是类型切换下拉；单元格聚焦/编辑时头部右侧显示六个快捷操作：下方插入、上方插入、上移、下移、复制、删除。Markdown 预览不显示头部，需要点击进入编辑后才能切换类型。工具栏在页面滚动时吸顶在顶部栏下方，按钮 tooltip 会跟随视口避让并在窄屏自动换行。编辑器**不提供数据集选择**：数据集由脚本内的 `trainhub_runtime.load_dataset(name)` 指定，见 5.7。
 - 快捷键：`A` / `B` 在选中单元上方/下方插入代码单元，`D` `D` 删除，`Ctrl/Cmd + S` 保存，`Ctrl/Cmd + Shift + ↑/↓` 移动单元。
 - 页面顶部标题直接显示 Notebook 名称，名称右侧的编辑图标可进入就地改名（失焦或回车提交、Esc 取消；改名算脚本修改，需保存）；保存后写入服务器的 `.ipynb` 文件，并出现在 Notebook 列表中。
 - 列表里点击 Notebook 名称或编辑图标，会加载现有内容继续编辑；已导入的 Notebook 也可以编辑，保存时会保留原有单元格 metadata、输出与顶层 metadata。
@@ -232,7 +233,7 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli serve --host 127.0.0.1 --port 74
 - 有排队/执行中的训练任务引用该 Notebook 时，保存返回 `409`，避免排队任务读到保存到一半的内容。
 - **运行单元格**使用按 Notebook 懒启动的交互式 Jupyter kernel：连续运行共享变量/导入状态，输出写回当前单元作为运行回显，**执行结束后若有输出会自动滚动到该单元的输出区**（错误 traceback 同样适用）。单元格运行按钮的默认动作是**「运行本格 + 自动补前置」**：先在同一内核里按顺序补跑尚未执行、或源码自上次成功执行后已变化的**前置代码单元格**，再运行目标单元格——任意单元格都可以直接点运行，无需手动逐格执行上面的单元格；已执行且源码未变的前置单元格会跳过，不重复产生副作用；点击运行的那一格则总是重新执行（跳过它会让点击毫无反应）。工具栏的**运行**是**「运行全部」**：按顺序执行全部代码单元格、不跳过已执行格，用于完整重放或首次执行整本脚本；工具栏另提供**「重启内核」**（丢弃内核状态、不运行代码，之后可用「运行」或单元格按钮干净重跑）。**训练任务（含平台推送的执行）排队/运行期间不允许运行单元格**：节点是单任务实例、GPU 独占，执行接口直接返回 409 并点名占用中的任务；任务结束自动恢复（内核启动本身不受限，仅执行时把关）。**执行是后台任务**：点击运行后服务端在后台执行并记录运行态（当前单元格、逐格状态与输出），接口立即返回。输出通过 **SSE 事件流实时回显**（`GET /api/notebooks/{id}/runs/stream?runId=`）：连接后先发 `state` 快照（补齐已产生的输出），之后按变化推送 `count` / `cell` / `stream`（只带新增文本）/ `output`（新增输出项）/ `outputs`（整体替换）/ `run`（终态）；断线自动重连，重连同样以快照重同步（事件带单调 `seq`，快照带 `lastEventSeq`，更小的事件丢弃）。刷新/重新进入页面**不会中断执行**，新页面会自动接管运行态——运行中继续显示「运行中」并接收实时输出，已结束则直接回填输出；运行中再次启动会得到 409（同一 Notebook 同一时刻只允许一个运行）。`GET /runs/current` 保留用于初载/终态取回完整结果。运行**不自动保存** Notebook，也不自动保存 Session；运行结束后点击「保存会话」才会写入 Session 快照。快照只保存运行输出与 `execution_count`，不保存源码、名称或结构；存在未保存的脚本修改时会阻止保存并提示先保存 Notebook。`.ipynb` 永远是纯脚本（`outputs=[]`、`execution_count=null`）；导入已有 Notebook 时原有输出会迁移为 `origin=import` 的 Session 快照，存量文件在首次读取/下载时也会把旧 outputs 迁为 `origin=legacy` 快照后清空脚本。下载 `.ipynb` 时，服务端会把最新快照中**源码哈希匹配**的输出挂载到导出的副本，不修改存储文件。编辑器与“提交整本 Notebook 训练”是两条独立路径：后者仍走执行队列、日志与产物。
 - 新建但尚未保存的 Notebook 首次运行单元格前会先保存纯脚本（用于创建 Notebook 与稳定 cell id）；**离开编辑器不再关闭内核会话**（后台运行需要继续、刷新后靠它恢复运行态与输出），会话由服务端按空闲回收（`TRAINHUB_KERNEL_SESSION_IDLE_SECONDS`，默认 30 分钟；同时最多 `TRAINHUB_MAX_KERNEL_SESSIONS` 个）。
-- 交互式内核会创建 `work/dataset` 与 `work/output`（注入 `WMG_DATASET_DIR` / `WMG_OUTPUT_DIR`）。工具栏选择数据集后，运行单元格/会话会把数据集文件挂载到 `work/dataset`（符号链接/复制，保留目录结构）；未选择时该目录为空。训练产物仍需通过训练任务或自行访问可读路径。
+- 交互式内核会创建 `work/output`（注入 `WMG_OUTPUT_DIR`）。编辑器不再选择/预挂载数据集，Notebook 用 `trainhub_runtime.load_dataset(name)` 按名称读取；训练产物仍需通过训练任务或自行访问可读路径。
 - 「导入 .ipynb」保留为独立入口：选择文件、可选显示名称，导入后同样可以继续手动编辑。
 
 #### 提交训练
@@ -258,7 +259,8 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli serve --host 127.0.0.1 --port 74
 #### 数据集共享
 
 - 上传时勾选「共享给其他用户」，或之后在数据集列表切换。
-- 共享后其他客户可以在列表中看到、下载，并在提交训练时只读挂载到 `dataset/`。
+- 共享后其他客户可以在列表中看到、下载，并在提交训练时只读挂载到 `dataset/`；运行时可用
+  `trainhub_runtime.load_dataset("customer_id/数据集名称")` 按名称加载（路径由服务端按所有者解析）。
 - 只有所有者能取消共享或删除；任何人排队/执行中的任务引用时删除返回 `409`。
 - 共享是应用层可见性，不是安全边界；详见 [3.1](#31-身份与可见性)。
 
@@ -311,6 +313,7 @@ data/customers/<customer>/runs/<run>/
 │   ├── notebook.ipynb     # 客户任务：提交时的 Notebook 副本（内核 cwd）
 │   ├── code/              # 平台任务：解压后的代码包（入口 notebook 所在目录为 cwd）
 │   ├── dataset/           # 数据集挂载（客户任务为符号链接；平台任务为解压目录）
+│   ├── .trainhub/datasets.json  # 可见数据集清单（trainhub_runtime.load_dataset 的数据源）
 │   └── assets/            # 平台任务：可选资产包（模型/基线目录）
 ├── output/                # 产物目录；executed_notebook.ipynb 也在这里
 ├── logs/run.log
@@ -324,13 +327,15 @@ data/customers/<customer>/runs/<run>/
 
 | 变量 | 含义 |
 |------|------|
-| `WMG_DATASET_DIR` / `DATASET_DIR` | 数据集目录（`work/dataset`） |
+| `WMG_DATASET_DIR` / `DATASET_DIR` | 训练任务挂载的数据集目录（`work/dataset`）；交互式内核不注入 |
 | `WMG_OUTPUT_DIR` / `OUTPUT_DIR` | 产物目录；写入这里的文件会出现在「产物」面板 |
 | `WMG_METRICS_FILE` | 可选训练指标文件（`logs/metrics.jsonl`）；追加 JSONL 后运行详情显示曲线 |
 | `WMG_PARAMS` | 提交任务时填写的参数，JSON 字符串 |
 | `WMG_RUN_ID` / `WMG_RUN_NAME` | 当前任务 ID / 名称 |
 | `WMG_CUSTOMER_ID` | 当前客户 ID |
-| `WMG_DATASET_NAME` / `WMG_NOTEBOOK_NAME` | 数据集 / Notebook 显示名 |
+| `WMG_DATASET_NAME` / `WMG_NOTEBOOK_NAME` | 训练任务的数据集 / Notebook 显示名 |
+| `WMG_DATASET_ID` | 训练任务选中的数据集 ID（未选择时为空；交互式内核不注入） |
+| `WMG_DATASET_CATALOG` | 可见数据集清单文件；`trainhub_runtime.load_dataset` 读取它按名称解析路径 |
 | `WMG_WORK_DIR` | 内核工作目录 |
 | `WMG_EXECUTION_ORIGIN` | 平台任务为 `platform`；客户任务不设置 |
 | `WMG_CONTROL_JOB_ID` | 平台控制面作业 ID（平台任务） |
@@ -341,11 +346,10 @@ data/customers/<customer>/runs/<run>/
 | `HF_HUB_CACHE` / `HF_XET_CACHE` | 指向共享缓存的 Hugging Face 缓存目录，避免每个会话重复下载 |
 | `PYTHONPATH` | 追加了 `trainhub_runtime` 助手包所在目录，Notebook 可直接 import |
 
-**Notebook 数据集选择**：编辑器工具栏的「数据集」选择会持久化在该 Notebook 上（`notebooks.dataset_id`）。
-运行单元格/启动会话时，选中的数据集文件会以符号链接（失败退化为复制）挂载到会话的
-`WMG_DATASET_DIR`，**目录结构原样保留**；切换数据集会整体替换该目录。运行中不能切换（接口返回 409），
-新选择在下次运行时生效。数据集本身支持整目录上传（自动去掉共同顶层目录），ZIP 可在数据集页一键解压成
-目录内容。训练任务提交表单里的数据集选择是独立的，按每次任务快照。
+**交互式内核的数据集**：编辑器不再选择数据集，也不预挂载 `work/dataset`；Notebook 用
+`trainhub_runtime.load_dataset(name)` / `dataset_path(name)` 按名称读取当前客户可见的数据集
+（含其他客户共享的，见 5.7）。训练任务提交表单仍可选数据集，只影响该次任务的
+`WMG_DATASET_DIR`（旧脚本约定），按每次任务快照。
 
 ### 5.2 执行语义
 
@@ -480,6 +484,51 @@ PYTHONPATH=src /opt/trainhub/trainer-venv/bin/python -m trainhub.cli models pull
 > **安全边界**：共享模型缓存按"可信客户"场景设计（与数据集共享一致）。Notebook 内核继承 TrainHub
 > 服务进程的环境变量，如果服务 env 配了 `HF_TOKEN`，客户代码可以读取并使用它；仅管理员可见的 HF 凭据
 > 不要放进 TrainHub 服务 env。需要气隙/预置模型时，用节点侧 `models pull` 预下载并关闭 Notebook 的联网下载。
+
+### 5.7 数据集读取与 `trainhub_runtime.load_dataset`
+
+数据集在服务端按「**所有者 + 数据集 ID**」存放（`<data>/customers/<owner>/datasets/<id>/files`），
+名称既不是目录名，也不保证全局唯一。**Notebook 不要自己拼
+`customers/<当前客户>/datasets/<名称>`** —— 其他客户共享过来的数据集，文件目录属于所有者，
+按当前客户 ID 拼必然找不到。
+
+平台在会话/任务的 `work/.trainhub/datasets.json` 写入「当前执行可见的数据集」清单
+（自有 + 其他客户共享），每条都带服务端解析好的绝对路径；训练代码直接按名称加载：
+
+```python
+from trainhub_runtime import load_dataset, list_datasets
+
+dataset = load_dataset("wmg-mail-v3full-v1")           # 自己的数据集
+shared = load_dataset("c_ab12cd34/wmg-mail-v3full-v1")  # 共享数据集：customer_id/数据集名称
+
+len(dataset.train), len(dataset.valid), len(dataset.test)
+dataset.manifest     # dataset_manifest.json（不存在时为空 dict）
+dataset.groups       # groups.json：split → 逐行分组键
+dataset.files        # split → 实际加载的绝对路径
+dataset.reference    # 可再次传给 load_dataset 的引用
+for record in dataset.train:
+    print(record["fields"]["subject"], record["answers"])
+```
+
+- **引用规则**：自己的数据集直接用名称；**其他客户共享的数据集必须用 `customer_id/数据集名称`**
+  （`customer_id` 见 `list_datasets()` 返回的 `ownerId` / `reference`）。交互式内核没有数据集选择，
+  `load_dataset()` 需要显式传名称；训练任务在提交表单选择了数据集时，不传名称读取该任务选中的数据集；
+- 共享数据集用裸名称引用会抛 `DatasetError` 并给出正确的 `customer_id/名称`；
+- **分片发现**：优先根目录 `train.jsonl` / `valid.jsonl` / `test.jsonl`；没有时按
+  `dataset_manifest.json` 的 `artifacts` 或文件名里的 `_train` / `_test` 识别
+  （例如 `wmg_mail_v3full_train.jsonl`）；`splits="train"` 可只加载一个分片；
+- 行按 JSONL 解析为 `dict` **原样返回**（WMG 常见 `fields` / `answers`；历史 `messages`
+  格式也原样返回，加载器不做格式转换）；坏行直接报错并给出文件名与行号；
+- `dataset_path(name)` / `dataset_info(name)` / `list_datasets()` 仍然可用（同样支持
+  `customer_id/名称`）；`dataset_path()` 返回数据集文件目录，不是 `work/dataset` 那层链接；
+- 清单在会话启动时生成：本机 `none` 模式下每次运行单元格都会刷新，新上传/新共享的数据集立即可见；
+  Docker 沙箱的只读挂载在创建内核时固定，新增数据集需要重启内核（下一次运行会自动重建）。
+
+平台推送的执行任务（训练与受控评估）只提交代码包，清单暴露该客户可见的全部数据集
+（自有 + 共享）：训练脚本按 hub 数据集名（`<name>@v<version>`）用 `trainhub_runtime.load_dataset`
+加载，评估器从 `WMG_PARAMS.datasetName` 取名称用同一接口加载——数据集由「数据集管理」的
+「推送」一次性写入节点 hub，不随每个任务重复上传。仅当调用 Admin API 时显式随任务上传
+数据集归档，才只暴露归档出来的那一份（缺省名 `dataset`）。
 
 ---
 
@@ -618,16 +667,18 @@ Linux 节点默认 `TRAINHUB_SANDBOX=docker`；macOS/MLX 节点默认且只能 `
 - **隔离参数**：`--user <服务uid:gid>`、`--read-only`、`--cap-drop ALL`、`--security-opt no-new-privileges`、
   `--pids-limit`、`--memory`、`--cpus`、`--network none`（默认）、`--tmpfs /tmp`；不挂 Docker socket、
   不挂宿主根目录、不传宿主环境变量。
-- **挂载**：会话 `work`（读写，含 `output`）、`home`（读写）、IPC 目录（读写）、选中数据集的存储目录（只读）、
-  共享模型缓存（默认只读）和仓库内 `runtime/` 助手（只读）。`.env`、SQLite、其他客户目录、代码仓库都不会出现。
+- **挂载**：会话 `work`（读写，含 `output`）、`home`（读写）、IPC 目录（读写）、当前客户可见的数据集
+  存储目录（自有 + 共享，只读）、共享模型缓存（默认只读）和仓库内 `runtime/` 助手（只读）。`.env`、
+  SQLite、其他客户目录、代码仓库都不会出现。
 - **内核协议**：宿主与容器内核通过 Unix socket（IPC）通信，因此 `--network none` 不影响内核控制通道；
   IPC 目录默认 `/var/tmp/trainhub-ipc`（要短，避免 Unix socket 路径上限），目录 0700。
 - **模型**：网络 `none` 时容器内 `HF_HUB_OFFLINE=1`；先在节点执行
   `python -m trainhub.cli models pull ...`（训练 venv 解释器）预拉模型；共享模型缓存默认只读，避免一个
   Notebook 污染其他租户的模型。**Notebook 的运行时依赖（pip 包）必须预装在镜像里**（`trainer` 镜像安装
   `trainer-requirements.txt`；特殊依赖请扩展镜像），`--network none` 下不能临时 pip install/HF 下载。
-- **数据集**：挂载的是创建内核时选中的数据集；Docker 模式下切换数据集不会热改容器挂载，**下一次运行会重建内核**
-  （变量/导入状态丢失），本地 `none` 模式仍是热切换。
+- **数据集**：挂载的是创建内核时当前客户可见的数据集（自有 + 共享，只读，供
+  `trainhub_runtime.load_dataset` 按名称读取）；Docker 模式下切换数据集或新增可见数据集不会热改容器挂载，
+  **下一次运行会重建内核**（变量/导入状态丢失），本地 `none` 模式仍是热切换。
 - **内核选择**：沙箱镜像自带 Python 内核，UI/metadata 里的宿主 kernelspec 名称不再决定运行时；镜像里的
   Python 由 `TRAINHUB_SANDBOX_PYTHON`（默认 `python3`）指定。
 - **预检**：启动时检查 Docker 守护进程与镜像、服务非 root、IPC 目录可写；不满足时执行接口返回 503，
@@ -731,6 +782,7 @@ $TRAINHUB_DATA_DIR/
 |------|------|------|
 | GET | `/api/auth/me` | 当前客户信息（令牌脱敏）与训练计数 |
 | GET | `/api/overview` | 概览：统计、存储、进行中任务、最近任务 |
+| GET | `/api/storage` | 存储页：客户目录占用、磁盘空间与数据集 / Notebooks / 训练任务占用明细 |
 | GET | `/api/kernels` | 可见内核列表与默认内核 |
 | GET | `/api/activity` | 本客户操作审计（分页） |
 | GET | `/api/health` | 服务与 Jupyter 状态（需令牌；`/healthz` 为无令牌探活） |
@@ -837,7 +889,7 @@ cd wmg-trainhub
 node scripts/check-frontend.mjs
 ```
 
-测试覆盖：鉴权、客户隔离、上传/下载、Notebook 手动新建与编辑、纯脚本存储与 Session 快照迁移/保存/导出挂载、交互式内核会话与单元格执行、Notebook 训练执行、SSE、单任务限制、取消、超时、路径穿越、平台闭环执行、执行器状态、静态资源、`.env` 加载、数据集共享、训练指标、参数回填、环境快照、Docker 沙箱参数/环境剥离/IPC 内核与清理。
+测试覆盖：鉴权、客户隔离、上传/下载、Notebook 手动新建与编辑、纯脚本存储与 Session 快照迁移/保存/导出挂载、交互式内核会话与单元格执行、Notebook 训练执行、SSE、单任务限制、取消、超时、路径穿越、平台闭环执行、执行器状态、静态资源、`.env` 加载、数据集共享、存储占用统计（分类/明细/磁盘）、数据集运行时（`load_dataset` 解析 manifest/groups/分片、共享数据集 `customer_id/名称` 引用、prefixed 产物名、坏行报错）、训练指标、参数回填、环境快照、Docker 沙箱参数/环境剥离/IPC 内核与清理。
 
 `tests/test_runs.py` 会启动真实 Jupyter 内核执行 Notebook（依赖 venv 中的 `ipykernel`）。
 
@@ -845,7 +897,7 @@ node scripts/check-frontend.mjs
 
 ## 11. 已知限制与后续方向
 
-- **执行隔离**：Linux 节点已提供 Docker 沙箱（每内核/每训练任务一个临时容器，默认 `--network none`、只读根、丢弃 capability、只挂会话目录/选中数据集/模型缓存）；macOS/MLX 节点只能 `none`，属于可信设备模型。剩余风险：Docker 守护进程权限等价 root（建议 rootless）、共享模型缓存只读但仍可能被读取、绑定目录没有磁盘配额、GPU 尚无显存感知调度。
+- **执行隔离**：Linux 节点已提供 Docker 沙箱（每内核/每训练任务一个临时容器，默认 `--network none`、只读根、丢弃 capability、只挂会话目录/可见数据集/模型缓存）；macOS/MLX 节点只能 `none`，属于可信设备模型。剩余风险：Docker 守护进程权限等价 root（建议 rootless）、共享模型缓存只读但仍可能被读取、绑定目录没有磁盘配额、GPU 尚无显存感知调度。
 - **孤儿内核/容器**：正常停止或重启会清理；SIGKILL/断电时本地内核可能残留 `ipykernel_launcher`，Docker 容器会在下次启动时按标签清理。运维可用 `ps`/`docker ps --filter label=com.wmg.trainhub.sandbox=1` 检查。
 - **调度**：FIFO + 固定并发；没有优先级、抢占、GPU 显存感知调度或跨节点调度。
 - **配额与计量**：暂无每客户存储/算力配额与计费；只有上传大小与日志大小上限。
@@ -855,4 +907,4 @@ node scripts/check-frontend.mjs
 - **指标**：只读尾部 4 MB、每系列最多 2000 点；没有指标归档、对比或 TensorBoard 集成。
 - **环境快照**：只记录服务环境与 kernelspec 标识，不采集内核实际 Python/依赖版本；需要完整复现时应在训练脚本中自行记录。
 - **平台集成**：TrainHub 不主动连接控制面，不做心跳、不保存控制面地址；节点健康由控制面主动探测。
-- **交互式内核**：每个 Notebook 一个会话，建模为临时工作目录；编辑器工具栏可选择数据集挂载到 `WMG_DATASET_DIR`，训练产物仍需通过训练任务生成。编辑器没有独立的 interrupt/restart 按钮（超时由服务端中断），离开编辑器或空闲超时会关闭会话。运行结果写回单元格后需要保存 Notebook 才持久化。
+- **交互式内核**：每个 Notebook 一个会话，建模为临时工作目录；编辑器不选择数据集，脚本用 `trainhub_runtime.load_dataset(name)` 读取，训练产物仍需通过训练任务生成。编辑器没有独立的 interrupt/restart 按钮（超时由服务端中断），离开编辑器或空闲超时会关闭会话。运行结果写回单元格后需要保存 Notebook 才持久化。
