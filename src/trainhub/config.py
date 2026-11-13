@@ -70,6 +70,53 @@ def _load_dotenv(path: Path) -> None:
         os.environ[key] = value
 
 
+def host_memory_mb() -> int:
+    """本机物理内存（MB）；取不到时返回 0。"""
+    try:
+        meminfo = Path("/proc/meminfo")
+        if meminfo.is_file():
+            for line in meminfo.read_text(encoding="utf-8").splitlines():
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        import subprocess
+
+        raw = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True, timeout=2)
+        return int(raw.strip()) // (1024 * 1024)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+
+
+def sandbox_memory_setting() -> tuple[int, str]:
+    """沙箱内存上限与来源。
+
+    - ``TRAINHUB_SANDBOX_MEMORY_MB`` > 0：显式值（运维覆盖）；
+    - 显式 0 / 未配置：按本机物理内存自动推荐。TrainHub 单任务执行，留 15%
+      给系统/Docker/日志后尽量分配（约 85%），并向下取整到 1GB；
+    - 取不到物理内存时回退 4096MB。
+    """
+    raw = (os.environ.get("TRAINHUB_SANDBOX_MEMORY_MB") or "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"TRAINHUB_SANDBOX_MEMORY_MB 必须是整数，当前值：{raw!r}"
+            ) from exc
+        if value < 0:
+            raise RuntimeError("TRAINHUB_SANDBOX_MEMORY_MB 不能为负数")
+        if value > 0:
+            return value, "env"
+    total = host_memory_mb()
+    if total <= 0:
+        return 4096, "default"
+    limit = max(1024, int(total * 0.85))
+    limit = max(1024, (limit // 1024) * 1024)
+    return limit, f"auto:host={total}MB"
+
+
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path
@@ -98,6 +145,7 @@ class Settings:
     sandbox_docker_bin: str = "docker"
     sandbox_network: str = "none"
     sandbox_memory_mb: int = 4096
+    sandbox_memory_source: str = ""
     sandbox_cpus: float = 2.0
     sandbox_pids_limit: int = 512
     sandbox_gpus: str = ""
@@ -164,6 +212,7 @@ class Settings:
             )
         raw_ipc_dir = (os.environ.get("TRAINHUB_SANDBOX_IPC_DIR") or "").strip()
         sandbox_ipc_dir = Path(raw_ipc_dir).expanduser() if raw_ipc_dir else None
+        sandbox_memory_mb, sandbox_memory_source = sandbox_memory_setting()
         return cls(
             data_dir=data_dir,
             db_path=db_path,
@@ -192,7 +241,8 @@ class Settings:
             sandbox_image=os.environ.get("TRAINHUB_SANDBOX_IMAGE", "trainhub-sandbox:latest"),
             sandbox_docker_bin=os.environ.get("TRAINHUB_SANDBOX_DOCKER", "docker"),
             sandbox_network=os.environ.get("TRAINHUB_SANDBOX_NETWORK", "none"),
-            sandbox_memory_mb=_int_env("TRAINHUB_SANDBOX_MEMORY_MB", 4096, minimum=128),
+            sandbox_memory_mb=sandbox_memory_mb,
+            sandbox_memory_source=sandbox_memory_source,
             sandbox_cpus=_float_env("TRAINHUB_SANDBOX_CPUS", 2.0, minimum=0.1),
             sandbox_pids_limit=_int_env("TRAINHUB_SANDBOX_PIDS_LIMIT", 512, minimum=16),
             sandbox_gpus=(os.environ.get("TRAINHUB_SANDBOX_GPUS") or "").strip(),

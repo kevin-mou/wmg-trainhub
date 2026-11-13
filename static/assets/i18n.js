@@ -101,7 +101,7 @@ const dictionaries = {
     },
     storage: {
       title: "存储",
-      subtitle: "客户目录占用与磁盘空间；共享数据集属于所有者，不计入当前客户占用。",
+      subtitle: "客户目录占用与数据目录所在磁盘空间；共享数据集属于所有者，不计入当前客户占用。",
       refresh: "刷新",
       summary: {
         customer: "客户占用",
@@ -593,7 +593,7 @@ const dictionaries = {
     storage: {
       title: "Storage",
       subtitle:
-        "Customer directory usage and disk space. Shared datasets belong to their owner and are not counted here.",
+        "Customer directory usage and the filesystem hosting the data directory. Shared datasets belong to their owner and are not counted here.",
       refresh: "Refresh",
       summary: {
         customer: "Customer usage",

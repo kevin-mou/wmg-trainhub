@@ -323,7 +323,19 @@ class Storage:
                     continue
         return total
 
-    @staticmethod
-    def disk_usage() -> dict[str, int]:
-        usage = shutil.disk_usage("/")
-        return {"totalBytes": usage.total, "freeBytes": usage.free, "usedBytes": usage.used}
+    def disk_usage(self) -> dict[str, int | str]:
+        """数据目录所在文件系统的容量（客户数据与模型缓存都在这里）。
+
+        不能用 ``shutil.disk_usage("/")``：节点常把 ``TRAINHUB_DATA_DIR`` 放在
+        独立挂载的数据盘（如 gpu-01 的 ``/data``），根文件系统只反映系统盘。
+        """
+        path = self.root
+        while not path.exists() and path != path.parent:
+            path = path.parent
+        usage = shutil.disk_usage(path)
+        return {
+            "path": str(self.root),
+            "totalBytes": usage.total,
+            "freeBytes": usage.free,
+            "usedBytes": usage.used,
+        }

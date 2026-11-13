@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
-# 创建/更新 macOS/MLX 训练内核 venv：
+# 创建/更新 macOS/MLX 训练 venv：
 #   - 干净 venv（不使用 --system-site-packages，也不修改 TrainHub 应用 venv）
 #   - 固定版本依赖（deploy/trainer-requirements-macos.txt）
 #   - startlux-decide：wheelhouse 优先，否则钉 commit 从 git 安装
-#   - 注册用户级 Jupyter 内核（默认 wmg-mlx）、导入自检、写 requirements.lock
+#   - 导入自检、写 requirements.lock；不再注册独立 Jupyter 内核
 #
 # 用法：
-#   deploy/macos-trainer-env.sh                  # 创建/更新默认 venv 并注册内核
+#   deploy/macos-trainer-env.sh                  # 创建/更新默认 venv
 #   deploy/macos-trainer-env.sh --dry-run        # 只打印计划
 #   deploy/macos-trainer-env.sh --recreate       # 删除旧 venv 后重建
-#   VENV=/opt/trainhub/trainer-mlx-venv KERNEL_NAME=wmg-mlx deploy/macos-trainer-env.sh
+#   VENV=/opt/trainhub/trainer-mlx-venv deploy/macos-trainer-env.sh
 #
-# 注意：以 TrainHub 服务用户执行（不要 sudo）；内核注册到该用户的 ~/Library/Jupyter/kernels。
+# 注意：以 TrainHub 服务用户执行（不要 sudo）。脚本只准备训练 venv；
+# 请确保 TrainHub 默认的 python3 kernelspec 指向该 venv（脚本结束时会检查并提示）。
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="${VENV:-$HOME/wmg-model-ops/trainer-mlx-venv}"
-KERNEL_NAME="${KERNEL_NAME:-wmg-mlx}"
-KERNEL_DISPLAY="${KERNEL_DISPLAY:-WMG MLX}"
 REQUIREMENTS="${REQUIREMENTS:-$DIR/trainer-requirements-macos.txt}"
 WHEELHOUSE="${WHEELHOUSE:-/opt/trainhub/wheelhouse}"
 STARTLUX_COMMIT="${STARTLUX_COMMIT:-ead714859f231c57e6263e18db63a1ee4c68f1ea}"
@@ -37,7 +36,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 if [[ "$(id -u)" -eq 0 ]]; then
-  echo "不要用 root 运行：内核会注册到 root 的 ~/Library/Jupyter，TrainHub 服务用户看不到。" >&2
+  echo "不要用 root 运行：训练 venv 会归 root 所有，TrainHub 服务用户无法使用。" >&2
   exit 1
 fi
 
@@ -80,7 +79,7 @@ if [[ "$MODE" == "dry-run" ]]; then
   训练 venv   $VENV（干净 venv，无 --system-site-packages）
   依赖清单    $REQUIREMENTS
   startlux    $STARTLUX_SOURCE
-  Jupyter 内核 $KERNEL_NAME（$KERNEL_DISPLAY，注册到当前用户）
+  Jupyter 内核 不注册（TrainHub 默认 python3 kernelspec 需指向该 venv）
 EOF
   exit 0
 fi
@@ -110,8 +109,6 @@ else
   "$VENV/bin/python" -m pip install --upgrade "$STARTLUX_SPEC"
 fi
 
-"$VENV/bin/python" -m ipykernel install --user --name "$KERNEL_NAME" --display-name "$KERNEL_DISPLAY"
-
 "$VENV/bin/python" - <<'PY'
 import importlib.metadata as md
 
@@ -129,4 +126,45 @@ PY
 
 "$VENV/bin/python" -m pip freeze > "$VENV/requirements.lock"
 echo "版本快照：$VENV/requirements.lock"
-echo "内核已注册：$KERNEL_NAME（TrainHub 提交任务时选择它，或在 notebook metadata 写 kernelspec）"
+echo "训练 venv：$VENV"
+echo "未注册 Jupyter 内核（不再创建 wmg-mlx）。"
+
+# 只检查、不改写 TrainHub 应用 venv：默认 python3 内核必须指向训练 venv，
+# 否则训练代码会落在没有 MLX 依赖的应用环境里（表现为 import mlx 失败）。
+# 用户级 python3 内核优先于 venv 内内核（用户覆盖），有则检查它。
+DEFAULT_KERNEL_JSON="$APP_VENV/share/jupyter/kernels/python3/kernel.json"
+if [[ -f "$HOME/Library/Jupyter/kernels/python3/kernel.json" ]]; then
+  DEFAULT_KERNEL_JSON="$HOME/Library/Jupyter/kernels/python3/kernel.json"
+fi
+if [[ -f "$DEFAULT_KERNEL_JSON" ]]; then
+  default_python="$("$VENV/bin/python" - "$DEFAULT_KERNEL_JSON" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    spec = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    print("")
+else:
+    argv = spec.get("argv") or []
+    print(argv[0] if argv else "")
+PY
+)"
+  if [[ -n "$default_python" ]] && "$VENV/bin/python" -c \
+    'import os, sys; raise SystemExit(0 if os.path.realpath(sys.argv[1]) == os.path.realpath(sys.argv[2]) else 1)' \
+    "$default_python" "$VENV/bin/python"; then
+    echo "默认 python3 内核已指向训练 venv：$default_python"
+  else
+    echo "警告：TrainHub 默认 python3 内核指向 ${default_python:-未知解释器}，不是训练 venv。" >&2
+    echo "      请把该 kernelspec 的 argv[0] 改为 $VENV/bin/python，否则训练代码看不到 MLX 依赖。" >&2
+  fi
+else
+  echo "注意：未找到 TrainHub 应用 venv 的 python3 kernelspec（$DEFAULT_KERNEL_JSON）。" >&2
+  echo "      请确认 TrainHub 使用的默认 Jupyter 内核指向 $VENV/bin/python。" >&2
+fi
+
+LEGACY_KERNEL="$HOME/Library/Jupyter/kernels/wmg-mlx"
+if [[ -d "$LEGACY_KERNEL" ]]; then
+  echo "提示：检测到旧的用户级内核 wmg-mlx（$LEGACY_KERNEL）；本脚本不再维护它，如不需要可手动删除。"
+fi

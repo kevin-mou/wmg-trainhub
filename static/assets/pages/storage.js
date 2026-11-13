@@ -81,11 +81,11 @@ export async function renderStorage(root, ctx) {
           <div class="ledger-value">${formatBytes(customerBytes)}</div>
           <div class="ledger-label">${escapeHtml(t("storage.summary.customer"))}</div>
         </div>
-        <div class="ledger-item">
+        <div class="ledger-item" title="${escapeHtml(disk.path || "")}">
           <div class="ledger-value">${formatBytes(disk.freeBytes)}</div>
           <div class="ledger-label">${escapeHtml(t("storage.summary.free"))}</div>
         </div>
-        <div class="ledger-item">
+        <div class="ledger-item" title="${escapeHtml(disk.path || "")}">
           <div class="ledger-value">${formatBytes(disk.totalBytes)}</div>
           <div class="ledger-label">${escapeHtml(t("storage.summary.total"))}</div>
         </div>

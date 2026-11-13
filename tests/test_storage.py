@@ -1,6 +1,34 @@
 from __future__ import annotations
 
 from helpers import upload_dataset, upload_notebook
+from trainhub.storage import Storage
+
+
+def test_disk_usage_uses_data_directory_filesystem(tmp_path, monkeypatch):
+    """磁盘容量必须取 TRAINHUB_DATA_DIR 所在文件系统（节点数据盘），而不是 /。"""
+    import trainhub.storage as storage_module
+
+    root = tmp_path / "data"
+    root.mkdir()
+    storage = Storage(root)
+    seen = []
+
+    class Usage:
+        total = 1000
+        used = 400
+        free = 600
+
+    monkeypatch.setattr(
+        storage_module.shutil, "disk_usage", lambda path: seen.append(path) or Usage
+    )
+    result = storage.disk_usage()
+    assert seen == [storage.root]
+    assert result == {
+        "path": str(storage.root),
+        "totalBytes": 1000,
+        "freeBytes": 600,
+        "usedBytes": 400,
+    }
 
 
 async def test_storage_requires_auth(client):
@@ -49,6 +77,7 @@ async def test_storage_breakdown_and_details(client, app, db, customer, headers)
         categories[key]["bytes"] for key in ("datasets", "notebooks", "runs")
     )
     assert data["disk"]["totalBytes"] > 0
+    assert data["disk"]["path"] == str(app.state.storage.root)
 
     datasets = data["details"]["datasets"]
     assert datasets["total"] == 1

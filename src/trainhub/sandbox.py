@@ -322,6 +322,10 @@ class DockerSandbox:
             "max-size=10m",
             "--log-opt",
             "max-file=1",
+            # Docker 29 的 local driver 默认开启压缩；max-file=1 时压缩不合法，
+            # 容器创建会直接失败（compression cannot be enabled when max file count is 1）。
+            "--log-opt",
+            "compress=false",
             "--workdir",
             str(spec.cwd),
         ]

@@ -11,7 +11,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 
 from .. import __version__
-from ..config import Settings
+from ..config import Settings, host_memory_mb
 from ..db import Database
 from ..kernels import (
     effective_default_kernel,
@@ -236,6 +236,11 @@ async def admin_executor_status(
             "jupyterAvailable": jupyter_available(),
             "defaultKernel": effective_default_kernel(settings),
             "sandbox": sandbox,
+            "sandboxMemory": {
+                "limitMb": settings.sandbox_memory_mb,
+                "source": settings.sandbox_memory_source,
+                "hostMemoryMb": host_memory_mb(),
+            },
             "version": __version__,
         }
     )

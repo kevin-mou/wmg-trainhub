@@ -112,6 +112,8 @@ def test_build_run_args_is_hardened(tmp_path):
     assert args[args.index("--memory") + 1] == "2048m"
     assert args[args.index("--cpus") + 1] == "1.5"
     assert args[args.index("--pids-limit") + 1] == "128"
+    assert "compress=false" in args
+    assert args.index("compress=false") > args.index("max-file=1")
     assert args[args.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
     assert "--privileged" not in args
     assert "trainhub-sandbox:test" in args

@@ -636,7 +636,7 @@ Notebook 内核由 kernelspec 指向训练 venv（MLX/CUDA/transformers）。Tra
 MLX 节点的训练内核是**独立 venv**（不是 TrainHub 的 `.venv`），用 `deploy/macos-trainer-env.sh` 创建/更新：
 
 ```bash
-# 以 TrainHub 服务用户执行（不要 sudo）；内核注册到该用户的 ~/Library/Jupyter/kernels
+# 以 TrainHub 服务用户执行（不要 sudo）；只准备训练 venv，不注册独立内核
 deploy/macos-trainer-env.sh --dry-run      # 先看计划
 BASE_PYTHON=/opt/homebrew/bin/python3.11 deploy/macos-trainer-env.sh
 ```
@@ -644,7 +644,8 @@ BASE_PYTHON=/opt/homebrew/bin/python3.11 deploy/macos-trainer-env.sh
 - 干净 venv（不使用 `--system-site-packages`），依赖固定版本见 `deploy/trainer-requirements-macos.txt`
   （mlx / mlx-vlm / transformers / huggingface_hub / ipykernel）；
 - `startlux-decide`：`/opt/trainhub/wheelhouse` 有 wheel 就用 wheel，否则钉 commit 从 git 安装；
-- 注册用户级内核 `wmg-mlx`（`KERNEL_NAME` 可改），提交训练时在 `kernel` 或 notebook metadata 里选它；
+- **不再注册独立的 `wmg-mlx` 内核**：脚本只准备训练 venv，并检查 TrainHub 应用 venv 的 `python3` kernelspec
+  是否已指向该 venv（不一致时给出警告与修改提示）；节点管理员也可在 notebook metadata 里写明已有的训练内核名；
 - 安装结束做导入自检（`startlux_decide.prompt`、`mlx_vlm.trainer.peft`）并写 `requirements.lock`；
 - 升级版本：改 requirements 后重跑脚本；`--recreate` 可删除旧 venv 重建；
 - macOS 节点只能 `TRAINHUB_SANDBOX=none`，不要用 Docker 跑 MLX。
@@ -654,6 +655,7 @@ BASE_PYTHON=/opt/homebrew/bin/python3.11 deploy/macos-trainer-env.sh
 Linux 节点默认 `TRAINHUB_SANDBOX=docker`；macOS/MLX 节点默认且只能 `none`（显式 `docker` 会在启动时报错）。
 沙箱把每个交互式内核和每个训练任务放进**独立的短生命周期容器**，不再以服务用户身份直接跑 Notebook 代码：
 
+- **加速内核（Docker 模式）**：`deploy/install-trainer-kernels.sh` 只作用于宿主机 `trainer-venv`（`TRAINHUB_SANDBOX=none` 的 macOS/MLX 场景），**不会进入 Docker 沙箱**。Docker 训练要用 `flash-linear-attention` / `causal-conv1d`，必须在沙箱镜像里预装（派生镜像：`apt-get install build-essential`，`pip install flash-linear-attention==0.6.0 fla-core==0.6.0 einops`；`causal-conv1d` 需按 GPU 架构从源码构建），再改 `TRAINHUB_SANDBOX_IMAGE`。**硬件限制**：`causal-conv1d` 最低 sm75，V100（sm70）不支持；`flash-linear-attention` 在 V100 + Triton 3.2 实测编译报 `LLVM ERROR: Failed to compute parent layout for slice layout`，因此 V100 节点只能保留参考实现（训练能跑但慢），要提速需换 Ampere 及以上 GPU。
 - **镜像**：`deploy/sandbox/Dockerfile`（CPU 最小内核；`trainer` 目标安装 `deploy/trainer-requirements.txt`）；
   `deploy/sandbox/Dockerfile.cuda` 是基于 CUDA 的训练镜像示例。构建：
 
@@ -743,13 +745,16 @@ $TRAINHUB_DATA_DIR/
 
 备份建议：`sqlite3 trainhub.db ".backup backup.db"` 加整个 `customers/` 目录（低峰或停机时执行）；恢复时保持目录与数据库一致。数据不会自动过期清理，请结合节点磁盘容量配置上传上限与保留策略。
 
+控制台「存储」页的磁盘容量取自 `$TRAINHUB_DATA_DIR` 所在文件系统（数据盘），不是根文件系统：
+把 `TRAINHUB_DATA_DIR` 配到独立挂载的数据盘时，页面显示的是该盘的容量与剩余空间。
+
 ### 7.6 健康检查与重启
 
 - 无令牌探活：`GET /healthz`，返回 `{"status":"ok"}`。
 - 带令牌检查服务与 Jupyter：`GET /api/health` 或 `GET /api/kernels`。
 - 重启：执行中的任务会中断并标记为失败（消息「服务重启，训练中断」），排队任务自动恢复执行。
 - 进程日志：stdout（uvicorn 与 TrainHub 业务日志）；训练日志在各自任务的 `logs/run.log`。
-- 磁盘水位：控制台概览显示客户存储与磁盘剩余；节点侧建议额外配置磁盘告警。
+- 磁盘水位：控制台概览显示客户存储与数据目录所在磁盘剩余；节点侧建议额外配置磁盘告警。
 
 ### 7.7 常见问题
 
@@ -782,7 +787,7 @@ $TRAINHUB_DATA_DIR/
 |------|------|------|
 | GET | `/api/auth/me` | 当前客户信息（令牌脱敏）与训练计数 |
 | GET | `/api/overview` | 概览：统计、存储、进行中任务、最近任务 |
-| GET | `/api/storage` | 存储页：客户目录占用、磁盘空间与数据集 / Notebooks / 训练任务占用明细 |
+| GET | `/api/storage` | 存储页：客户目录占用、数据目录所在磁盘空间与数据集 / Notebooks / 训练任务占用明细 |
 | GET | `/api/kernels` | 可见内核列表与默认内核 |
 | GET | `/api/activity` | 本客户操作审计（分页） |
 | GET | `/api/health` | 服务与 Jupyter 状态（需令牌；`/healthz` 为无令牌探活） |
@@ -868,7 +873,7 @@ $TRAINHUB_DATA_DIR/
 | `TRAINHUB_SANDBOX_IMAGE` | `trainhub-sandbox:latest` | 沙箱镜像名（需先构建/拉取） |
 | `TRAINHUB_SANDBOX_DOCKER` | `docker` | Docker CLI 路径 |
 | `TRAINHUB_SANDBOX_NETWORK` | `none` | 容器网络；`none` 时 HF 离线，模型需预拉 |
-| `TRAINHUB_SANDBOX_MEMORY_MB` | `4096` | 每内核容器内存上限 |
+| `TRAINHUB_SANDBOX_MEMORY_MB` | 自动 | 每内核/训练容器内存上限：未配置或 `0` = 按宿主机物理内存的 85% 自动推荐（TrainHub 单任务执行，留 15% 给系统/Docker），向下取整到 1GB；显式正数覆盖；取不到物理内存时回退 4096MB |
 | `TRAINHUB_SANDBOX_CPUS` | `2` | 每内核容器 CPU 上限 |
 | `TRAINHUB_SANDBOX_PIDS_LIMIT` | `512` | 每内核容器 PID 上限 |
 | `TRAINHUB_SANDBOX_GPUS` | 空 | `all` / `device=0`；CUDA 镜像使用 |
