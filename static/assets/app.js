@@ -332,7 +332,10 @@ function renderLoginView() {
   });
 }
 
-async function handleLogin(token) {
+async function handleLogin(payload) {
+  const data = await http.post("/api/auth/login", payload);
+  const token = data && data.token;
+  if (!token) throw new Error(t("errors.unauthorized"));
   setToken(token);
   let me;
   try {
@@ -348,6 +351,7 @@ async function handleLogin(token) {
   if (!path || path === "/login") navigate("/overview");
   else scheduleRoute();
   toast(`${t("toast.loggedIn")} · ${me.name}`, "success");
+  return token;
 }
 
 /* ---------------------------------------------------------------- settings */

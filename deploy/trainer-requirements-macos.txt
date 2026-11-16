@@ -8,3 +8,5 @@ mlx-vlm==0.7.11
 transformers==5.17.0
 huggingface_hub==1.33.0
 ipykernel==7.4.0
+# 受控评估器（engine=mlx）：Laya MLX 推理；评估任务与训练共用这个内核 venv
+laya-mlx==0.5.0

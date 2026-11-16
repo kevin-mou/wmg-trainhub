@@ -34,6 +34,8 @@ class RunCreate(BaseModel):
 class CustomerCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     email: str | None = Field(default=None, max_length=200)
+    # 可选：登录用户名；缺省依次取邮箱、客户 ID（大小写不敏感）
+    username: str | None = Field(default=None, max_length=120)
     # 可选：指定访问令牌（导入既有身份/多实例统一身份时使用）；缺省由服务端生成
     token: str | None = Field(default=None, min_length=8, max_length=128)
 
@@ -45,6 +47,14 @@ class CustomerCreate(BaseModel):
             raise ValueError("客户名称不能为空")
         return value
 
+    @field_validator("username")
+    @classmethod
+    def _strip_username(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
     @field_validator("token")
     @classmethod
     def _validate_token(cls, value: str | None) -> str | None:
@@ -55,6 +65,28 @@ class CustomerCreate(BaseModel):
             raise ValueError("访问令牌必须以 trh_ 开头")
         if any(char.isspace() for char in value):
             raise ValueError("访问令牌不能包含空白字符")
+        return value
+
+
+class LoginRequest(BaseModel):
+    """登录请求：访问令牌，或用户名 + 密码（二选一）。"""
+
+    token: str | None = Field(default=None, max_length=128)
+    username: str | None = Field(default=None, max_length=120)
+    password: str | None = Field(default=None, max_length=128)
+
+
+class PasswordUpdate(BaseModel):
+    """设置/更新当前客户密码；已有密码时必须提供 currentPassword。"""
+
+    currentPassword: str | None = Field(default=None, max_length=128)
+    newPassword: str = Field(min_length=8, max_length=128)
+
+    @field_validator("newPassword")
+    @classmethod
+    def _check_new_password(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("新密码不能为空白字符")
         return value
 
 

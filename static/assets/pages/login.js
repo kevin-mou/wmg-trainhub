@@ -81,9 +81,17 @@ export function renderLogin(root, { onLogin, onToggleLang, onToggleTheme, theme 
           <div class="login-card">
             <h2>${escapeHtml(t("login.title"))}</h2>
             <p class="login-sub">${escapeHtml(t("login.subtitle"))}</p>
+            <div class="segmented login-mode" id="login-mode">
+              <button type="button" data-mode="token" class="active">${escapeHtml(
+                t("login.modeToken")
+              )}</button>
+              <button type="button" data-mode="password">${escapeHtml(
+                t("login.modePassword")
+              )}</button>
+            </div>
             <p class="login-error" id="login-error" role="alert"></p>
             <form id="login-form" autocomplete="off" novalidate>
-              <div class="field">
+              <div class="field" id="login-token-group">
                 <label for="login-token">${escapeHtml(t("login.tokenLabel"))}</label>
                 <div class="token-field">
                   <input class="input" id="login-token" type="password" spellcheck="false"
@@ -103,6 +111,23 @@ export function renderLogin(root, { onLogin, onToggleLang, onToggleTheme, theme 
                   t("login.rememberHint")
                 )}</span>
               </div>
+
+              <div class="field" id="login-password-group" hidden>
+                <label for="login-username">${escapeHtml(t("login.usernameLabel"))}</label>
+                <input class="input" id="login-username" type="text" spellcheck="false"
+                  autocomplete="username"
+                  placeholder="${escapeHtml(t("login.usernamePlaceholder"))}" />
+                <label for="login-password">${escapeHtml(t("login.passwordLabel"))}</label>
+                <div class="token-field">
+                  <input class="input" id="login-password" type="password"
+                    autocomplete="current-password"
+                    placeholder="${escapeHtml(t("login.passwordPlaceholder"))}" />
+                  <button type="button" class="icon-btn" id="login-password-reveal"
+                    aria-label="${escapeHtml(t("account.reveal"))}">${icons.eye}</button>
+                </div>
+                <span class="hint">${escapeHtml(t("login.passwordHint"))}</span>
+              </div>
+
               <button type="submit" class="btn btn-primary login-submit" id="login-submit">
                 ${escapeHtml(t("login.submit"))}
               </button>
@@ -114,22 +139,48 @@ export function renderLogin(root, { onLogin, onToggleLang, onToggleTheme, theme 
     </div>`;
 
   const form = root.querySelector("#login-form");
-  const input = root.querySelector("#login-token");
+  const tokenInput = root.querySelector("#login-token");
+  const usernameInput = root.querySelector("#login-username");
+  const passwordInput = root.querySelector("#login-password");
   const error = root.querySelector("#login-error");
   const submit = root.querySelector("#login-submit");
-  const reveal = root.querySelector("#login-reveal");
+  const tokenReveal = root.querySelector("#login-reveal");
+  const passwordReveal = root.querySelector("#login-password-reveal");
   const rememberInput = root.querySelector("#login-remember");
+  const tokenGroup = root.querySelector("#login-token-group");
+  const passwordGroup = root.querySelector("#login-password-group");
+  const modeButtons = root.querySelectorAll("#login-mode [data-mode]");
+  let mode = "token";
 
   const showError = (message) => {
     error.textContent = message || "";
     error.classList.toggle("show", Boolean(message));
   };
 
-  reveal.addEventListener("click", () => {
-    const isPassword = input.type === "password";
-    input.type = isPassword ? "text" : "password";
-    reveal.innerHTML = isPassword ? icons.eyeOff : icons.eye;
-    input.focus();
+  const setMode = (next) => {
+    mode = next === "password" ? "password" : "token";
+    modeButtons.forEach((button) => {
+      button.classList.toggle("active", button.dataset.mode === mode);
+    });
+    tokenGroup.hidden = mode !== "token";
+    passwordGroup.hidden = mode !== "password";
+    showError("");
+    (mode === "token" ? tokenInput : usernameInput).focus();
+  };
+
+  const bindReveal = (button, input) => {
+    button.addEventListener("click", () => {
+      const isPassword = input.type === "password";
+      input.type = isPassword ? "text" : "password";
+      button.innerHTML = isPassword ? icons.eyeOff : icons.eye;
+      input.focus();
+    });
+  };
+  bindReveal(tokenReveal, tokenInput);
+  bindReveal(passwordReveal, passwordInput);
+
+  modeButtons.forEach((button) => {
+    button.addEventListener("click", () => setMode(button.dataset.mode));
   });
 
   root.querySelector("#login-lang").addEventListener("click", onToggleLang);
@@ -137,28 +188,50 @@ export function renderLogin(root, { onLogin, onToggleLang, onToggleTheme, theme 
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const token = input.value.trim();
-    if (!token) {
-      showError(t("login.errorEmpty"));
-      input.focus();
-      return;
+    let payload;
+    if (mode === "token") {
+      const token = tokenInput.value.trim();
+      if (!token) {
+        showError(t("login.errorEmpty"));
+        tokenInput.focus();
+        return;
+      }
+      payload = { token };
+    } else {
+      const username = usernameInput.value.trim();
+      const password = passwordInput.value;
+      if (!username) {
+        showError(t("login.errorUsername"));
+        usernameInput.focus();
+        return;
+      }
+      if (!password) {
+        showError(t("login.errorPassword"));
+        passwordInput.focus();
+        return;
+      }
+      payload = { username, password };
     }
     showError("");
     submit.disabled = true;
     submit.textContent = t("login.submitting");
-    const remember = Boolean(rememberInput?.checked);
-    if (!remember) writeCookie(REMEMBER_COOKIE, "", 0);
     try {
-      await onLogin(token);
-      if (remember) writeCookie(REMEMBER_COOKIE, token, REMEMBER_MAX_AGE);
+      const result = await onLogin(payload);
+      if (mode === "token") {
+        const token = typeof result === "string" ? result : result?.token;
+        if (rememberInput?.checked && token) {
+          writeCookie(REMEMBER_COOKIE, token, REMEMBER_MAX_AGE);
+        } else if (rememberInput && !rememberInput.checked) {
+          writeCookie(REMEMBER_COOKIE, "", 0);
+        }
+      }
     } catch (err) {
       showError(err && err.message ? err.message : t("common.error"));
       submit.disabled = false;
       submit.textContent = t("login.submit");
-      input.focus();
-      input.select();
+      (mode === "token" ? tokenInput : usernameInput).focus();
     }
   });
 
-  setTimeout(() => input.focus(), 40);
+  setTimeout(() => (mode === "token" ? tokenInput : usernameInput).focus(), 40);
 }

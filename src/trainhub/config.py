@@ -102,9 +102,7 @@ def sandbox_memory_setting() -> tuple[int, str]:
         try:
             value = int(raw)
         except ValueError as exc:
-            raise RuntimeError(
-                f"TRAINHUB_SANDBOX_MEMORY_MB 必须是整数，当前值：{raw!r}"
-            ) from exc
+            raise RuntimeError(f"TRAINHUB_SANDBOX_MEMORY_MB 必须是整数，当前值：{raw!r}") from exc
         if value < 0:
             raise RuntimeError("TRAINHUB_SANDBOX_MEMORY_MB 不能为负数")
         if value > 0:

@@ -59,8 +59,6 @@ def default_kernel_name() -> str | None:
     return FALLBACK_KERNEL_NAME if FALLBACK_KERNEL_NAME in names else names[0]
 
 
-
-
 _RUNTIMES_MANIFEST = Path(__file__).resolve().parents[2] / "deploy" / "runtimes" / "runtimes.json"
 
 
@@ -100,6 +98,7 @@ def manifest_kernels() -> list[dict[str, str]]:
                 )
             )
     return kernels
+
 
 def effective_kernels(settings: Settings) -> list[dict[str, str]]:
     """UI/API 展示的内核：Docker 沙箱只提供镜像自带的 Python 内核。"""

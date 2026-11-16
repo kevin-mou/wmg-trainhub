@@ -82,6 +82,48 @@ export async function renderAccount(root, ctx) {
 
         <section class="panel">
           <div class="meta-section">
+            <div class="meta-title">${escapeHtml(t("account.passwordTitle"))}</div>
+            <dl class="kv" style="margin-bottom:10px">
+              <dt>${escapeHtml(t("account.username"))}</dt>
+              <dd class="mono" id="account-username">${escapeHtml(customer.username || "—")}</dd>
+              <dt>${escapeHtml(t("account.passwordStatus"))}</dt>
+              <dd id="password-status"></dd>
+            </dl>
+            <div class="meta-empty" style="margin-bottom:12px">${escapeHtml(
+              t("account.usernameHint")
+            )}</div>
+            <form id="password-form" autocomplete="off">
+              <div class="field" id="current-password-field" hidden>
+                <label for="account-current-password">${escapeHtml(
+                  t("account.currentPassword")
+                )}</label>
+                <input class="input" id="account-current-password" type="password"
+                  autocomplete="current-password" />
+              </div>
+              <div class="field">
+                <label for="account-new-password">${escapeHtml(t("account.newPassword"))}</label>
+                <input class="input" id="account-new-password" type="password"
+                  autocomplete="new-password" />
+              </div>
+              <div class="field">
+                <label for="account-confirm-password">${escapeHtml(
+                  t("account.confirmPassword")
+                )}</label>
+                <input class="input" id="account-confirm-password" type="password"
+                  autocomplete="new-password" />
+              </div>
+              <div class="meta-empty" style="margin-bottom:12px">${escapeHtml(
+                t("account.passwordHint")
+              )}</div>
+              <button type="submit" class="btn btn-primary" id="password-save">${escapeHtml(
+                t("account.savePassword")
+              )}</button>
+            </form>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="meta-section">
             <div class="meta-title">${escapeHtml(t("account.contract.title"))}</div>
             <div class="meta-empty">${escapeHtml(t("account.contract.text"))}</div>
             <pre class="contract-code">import os
@@ -159,6 +201,69 @@ open(os.path.join(output_dir, "model.pt"), "wb")</pre>
   root.querySelector("#token-copy").addEventListener("click", async () => {
     const copied = await copyText(token);
     toast(copied ? t("toast.copied") : t("account.errors.copyFailed"), copied ? "success" : "error");
+  });
+
+  let hasPassword = Boolean(customer.hasPassword);
+  const passwordForm = root.querySelector("#password-form");
+  const currentPasswordField = root.querySelector("#current-password-field");
+  const currentPasswordInput = root.querySelector("#account-current-password");
+  const newPasswordInput = root.querySelector("#account-new-password");
+  const confirmPasswordInput = root.querySelector("#account-confirm-password");
+  const passwordSave = root.querySelector("#password-save");
+  const passwordStatus = root.querySelector("#password-status");
+
+  const renderPasswordState = () => {
+    currentPasswordField.hidden = !hasPassword;
+    passwordStatus.textContent = hasPassword
+      ? t("account.passwordSet")
+      : t("account.passwordEmpty");
+  };
+  renderPasswordState();
+
+  passwordForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const current = currentPasswordInput.value;
+    const next = newPasswordInput.value;
+    const confirm = confirmPasswordInput.value;
+    if (!next) {
+      toast(t("account.passwordRequired"), "error");
+      newPasswordInput.focus();
+      return;
+    }
+    if (next.length < 8) {
+      toast(t("account.passwordTooShort"), "error");
+      newPasswordInput.focus();
+      return;
+    }
+    if (next !== confirm) {
+      toast(t("account.passwordMismatch"), "error");
+      confirmPasswordInput.focus();
+      return;
+    }
+    if (hasPassword && !current) {
+      toast(t("account.currentPasswordRequired"), "error");
+      currentPasswordInput.focus();
+      return;
+    }
+    passwordSave.disabled = true;
+    passwordSave.textContent = t("account.savingPassword");
+    try {
+      await http.put("/api/auth/password", {
+        ...(hasPassword ? { currentPassword: current } : {}),
+        newPassword: next,
+      });
+      hasPassword = true;
+      renderPasswordState();
+      currentPasswordInput.value = "";
+      newPasswordInput.value = "";
+      confirmPasswordInput.value = "";
+      toast(t("account.passwordSaved"), "success");
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      passwordSave.disabled = false;
+      passwordSave.textContent = t("account.savePassword");
+    }
   });
 
   root.querySelectorAll("#lang-seg [data-lang]").forEach((button) => {

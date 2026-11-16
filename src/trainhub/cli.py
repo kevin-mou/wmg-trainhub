@@ -112,12 +112,22 @@ def cmd_create_customer(args: argparse.Namespace) -> int:
     settings = Settings.from_env()
     db = _open_database(settings)
     try:
-        customer = db.create_customer(args.name.strip(), args.email, new_customer_token())
+        try:
+            customer = db.create_customer(
+                args.name.strip(),
+                args.email,
+                new_customer_token(),
+                username=args.username,
+            )
+        except ValueError as exc:
+            print(f"创建失败：{exc}", file=sys.stderr)
+            return 2
     finally:
         db.close()
     print(f"客户已创建：{customer['id']}  {customer['name']}")
+    print(f"登录用户名：{customer['username']}")
     print(f"访问令牌：{customer['token']}")
-    print("请把令牌交给客户；服务端只按令牌识别客户，令牌请妥善保管。")
+    print("账号默认没有密码，只能使用访问令牌登录；登录后可在「账户」页设置密码。")
     return 0
 
 
@@ -135,6 +145,7 @@ def cmd_list_customers(args: argparse.Namespace) -> int:
     for row in rows:
         print(
             f"{row['id']}  {row['status']:<8}  {row['name']}  "
+            f"用户名 {row.get('username') or '-'}  "
             f"数据集 {row['dataset_count']}  训练 {row['run_count']}"
         )
     return 0
@@ -184,6 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
     create = sub.add_parser("create-customer", help="创建客户并输出访问令牌")
     create.add_argument("--name", required=True)
     create.add_argument("--email", default=None)
+    create.add_argument("--username", default=None, help="登录用户名（缺省取邮箱或客户 ID）")
     create.set_defaults(func=cmd_create_customer)
 
     listing = sub.add_parser("list-customers", help="列出客户")

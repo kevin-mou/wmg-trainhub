@@ -12,6 +12,8 @@ def customer_public(row: dict[str, Any], *, include_token: bool = False) -> dict
         "id": row["id"],
         "name": row["name"],
         "email": row.get("email"),
+        "username": row.get("username"),
+        "hasPassword": bool(row.get("password_hash")),
         "status": row["status"],
         "createdAt": row["created_at"],
         "lastSeenAt": row.get("last_seen_at"),

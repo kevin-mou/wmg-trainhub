@@ -1,6 +1,6 @@
 # TrainHub — 单节点模型训练管理台
 
-TrainHub 是 WMG 仓库下的独立子工程，也是可以单独部署的训练节点服务。它把**数据集、Notebook、训练执行、日志、训练指标、执行环境与模型产物**放在同一台可控节点上：客户凭访问令牌进入工作台，提交训练后由节点内置的 Jupyter 内核执行，训练过程实时落盘，结果可直接下载，也可以被平台控制面推送和回收。
+TrainHub 是 WMG 仓库下的独立子工程，也是可以单独部署的训练节点服务。它把**数据集、Notebook、训练执行、日志、训练指标、执行环境与模型产物**放在同一台可控节点上：客户凭访问令牌或用户名+密码进入工作台，提交训练后由节点内置的 Jupyter 内核执行，训练过程实时落盘，结果可直接下载，也可以被平台控制面推送和回收。
 
 一句话概括：**不是公有云 Kaggle 的复刻，而是一台 GPU 节点的“客户自助训练工作台 + 平台执行器”。**
 
@@ -30,7 +30,7 @@ TrainHub 是 WMG 仓库下的独立子工程，也是可以单独部署的训练
 
 TrainHub 的目标是把这条链路压缩到一个进程和一个数据目录里：
 
-- **客户自助**：每个客户一个长期访问令牌，登录后只看到自己的工作区。
+- **客户自助**：每个客户一个长期访问令牌（可选设置用户名+密码），登录后只看到自己的工作区。
 - **训练可交付**：上传数据集，新建或导入 Notebook，提交任务，看到实时日志、训练指标、执行环境与产物。
 - **低依赖**：FastAPI + SQLite + 进程内执行器 + 静态 SPA，不依赖 Redis、消息队列、外部调度器或前端构建链。
 - **节点可离线**：控制台由服务端直接托管，GPU 节点无外网也能使用。
@@ -101,6 +101,7 @@ FastAPI（单实例，uvicorn 单 worker）
 ### 3.1 身份与可见性
 
 - 每个客户一个长期访问令牌，保存在 `customers.token`（唯一索引），所有 `/api/**` 业务接口都需要 `Authorization: Bearer <token>`（或 `X-API-Token`）。
+- 登录支持两种方式：访问令牌，或用户名 + 密码。新客户默认**没有密码**（只能令牌登录），登录后可在「账户」页设置/更新密码；密码只以 PBKDF2-SHA256 哈希保存，密码登录成功后返回该客户的访问令牌。
 - 令牌决定客户身份，也决定默认工作区：客户只能看到自己的数据集、Notebook、运行记录和活动日志。
 - 数据集支持 `private` / `shared`：
   - 默认私有；
@@ -151,6 +152,7 @@ FastAPI（单实例，uvicorn 单 worker）
 ### 3.6 安全边界
 
 - 访问令牌是长期凭据：只应通过 HTTPS 暴露；数据库与备份文件权限要收紧；泄露后立即 `rotate-token`。
+- 客户密码使用 PBKDF2-SHA256（随机盐、310,000 次迭代）保存，不落明文；密码登录成功后返回访问令牌，因此令牌仍是全部 API 的最终凭据。密码修改需要当前密码（首次设置除外）。
 - 管理接口需要 `X-Admin-Token: $TRAINHUB_ADMIN_TOKEN`；未配置时整体禁用（`503`）。
 - 平台到 TrainHub 之间会传输管理令牌（请求头）与客户令牌明文（创建/重置响应），请使用 HTTPS 或把节点限制在受控内网；平台侧的 `TRAINHUB_VERIFY_TLS=false` 只用于自签证书测试环境。
 - 上传上限：`TRAINHUB_MAX_DATASET_MB` / `TRAINHUB_MAX_NOTEBOOK_MB` / `TRAINHUB_MAX_CODE_MB` / `TRAINHUB_MAX_ASSETS_MB`；日志上限 `TRAINHUB_MAX_LOG_MB`。接口层未做请求频率限制，公网部署应在反向代理上限制速率与并发。
@@ -190,7 +192,7 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli create-customer --name "Acme Lab
 ./start.sh          # 默认监听 0.0.0.0:7470
 ```
 
-打开 `http://127.0.0.1:7470`，粘贴创建客户时输出的访问令牌即可进入控制台。
+打开 `http://127.0.0.1:7470`，使用创建客户时输出的访问令牌登录；如果账号已设置密码，也可以切换到「用户名密码」登录。
 
 > **执行沙箱提示**：Linux 节点默认 `TRAINHUB_SANDBOX=docker`，需要先构建/拉取沙箱镜像（见 7.1）；本地开发若暂时不用 Docker，在 `.env` 设置 `TRAINHUB_SANDBOX=none`（只适合可信本地环境）。macOS/MLX 节点必须 `none`。
 
@@ -214,7 +216,7 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli serve --host 127.0.0.1 --port 74
 - **训练任务**：提交、查看、取消、删除运行。
 - **存储**：客户目录占用、磁盘可用空间，以及数据集 / Notebooks / 训练任务占用明细（点击概览的存储统计也进入此页）。
 - **活动记录**：上传、提交、编辑、下载、删除等操作审计。
-- **账户**：客户资料、令牌脱敏展示、语言/主题切换。
+- **账户**：客户资料、登录用户名、密码设置/更新、令牌脱敏展示、语言/主题切换。
 
 #### 新建与编辑 Notebook
 
@@ -267,8 +269,10 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli serve --host 127.0.0.1 --port 74
 ### 4.3 客户与令牌管理
 
 ```bash
-# 创建客户（输出访问令牌）
+# 创建客户（输出登录用户名与访问令牌）
 PYTHONPATH=src .venv/bin/python -m trainhub.cli create-customer --name "Acme Labs" --email ops@acme.test
+# 可选指定登录用户名；缺省取邮箱，没有邮箱时使用客户 ID
+PYTHONPATH=src .venv/bin/python -m trainhub.cli create-customer --name "Acme Labs" --username acme
 
 # 列出客户
 PYTHONPATH=src .venv/bin/python -m trainhub.cli list-customers
@@ -280,7 +284,7 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli set-status --id c_ab12cd34 --sta
 
 管理 API（需要 `X-Admin-Token: $TRAINHUB_ADMIN_TOKEN`）：
 
-- `POST /api/admin/customers`（可选 `token`：导入既有身份时指定访问令牌，须 `trh_` 开头且全局唯一）、`GET /api/admin/customers`
+- `POST /api/admin/customers`（可选 `token`：导入既有身份时指定访问令牌，须 `trh_` 开头且全局唯一；可选 `username`：登录用户名，缺省取 `email`/客户 ID；新客户密码为空，只能令牌登录）、`GET /api/admin/customers`
 - `POST /api/admin/customers/{id}/rotate-token`
 - `POST /api/admin/customers/{id}/status`
 - `DELETE /api/admin/customers/{id}`（同时删除该客户全部文件，不可恢复）
@@ -295,11 +299,16 @@ PYTHONPATH=src .venv/bin/python -m trainhub.cli set-status --id c_ab12cd34 --sta
 - `GET /api/admin/executor/status`
 - `POST /api/admin/executions`（平台控制面推送的一次闭环执行；`customerId` 指定执行归属客户，缺省保留客户 `sys_platform`）
 
-令牌按需求**明文保存在数据表中**（`customers.token`）。管理 API 的客户列表会返回令牌明文，只应通过受控网络访问；一旦泄露立即 `rotate-token`。控制台不会在页面 URL 中携带令牌，所有请求走请求头。
+令牌按需求**明文保存在数据表中**（`customers.token`）。管理 API 的客户列表会返回令牌明文，只应通过受控网络访问；一旦泄露立即 `rotate-token`。控制台不会在页面 URL 中携带令牌，所有请求走请求头。客户密码只保存 PBKDF2-SHA256 哈希（`customers.password_hash`），管理接口不返回哈希或明文密码。
 
-### 4.4 登录页「记住令牌」
+### 4.4 登录方式与「记住令牌」
 
-登录页支持「记住令牌」（默认勾选）：成功登录后把令牌写入本浏览器 Cookie `trainhub_remembered_token`（30 天、`Path=/`、`SameSite=Strict`、HTTPS 下带 `Secure`），下次打开登录页自动回填。该 Cookie 只用于回填登录框，不参与鉴权；取消勾选并登录即清除。共享设备请取消勾选。
+登录页提供两种方式：
+
+- **访问令牌**：创建客户时输出的 `trh_…` 令牌；始终可用。
+- **用户名 + 密码**：新客户默认密码为空，此时只能令牌登录；登录后在「账户 → 密码登录」设置密码。用户名在创建客户时确定（默认取邮箱，没有邮箱时使用客户 ID），可在「账户」页查看。密码登录成功后返回该客户的访问令牌用于后续 API；令牌和密码都有效。
+
+「记住令牌」只作用于访问令牌方式：成功登录后把令牌写入本浏览器 Cookie `trainhub_remembered_token`（30 天、`Path=/`、`SameSite=Strict`、HTTPS 下带 `Secure`），下次打开登录页自动回填。该 Cookie 只用于回填登录框，不参与鉴权；取消勾选并登录即清除。共享设备请取消勾选。
 
 ---
 
@@ -785,7 +794,9 @@ $TRAINHUB_DATA_DIR/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/auth/me` | 当前客户信息（令牌脱敏）与训练计数 |
+| POST | `/api/auth/login` | 登录：`{token}` 或 `{username, password}`，成功返回访问令牌与客户信息 |
+| PUT | `/api/auth/password` | 设置/更新当前客户密码：`{currentPassword?, newPassword}`（已设置密码时必须提供当前密码） |
+| GET | `/api/auth/me` | 当前客户信息（令牌脱敏、登录用户名、是否已设置密码）与训练计数 |
 | GET | `/api/overview` | 概览：统计、存储、进行中任务、最近任务 |
 | GET | `/api/storage` | 存储页：客户目录占用、数据目录所在磁盘空间与数据集 / Notebooks / 训练任务占用明细 |
 | GET | `/api/kernels` | 可见内核列表与默认内核 |
@@ -894,7 +905,7 @@ cd wmg-trainhub
 node scripts/check-frontend.mjs
 ```
 
-测试覆盖：鉴权、客户隔离、上传/下载、Notebook 手动新建与编辑、纯脚本存储与 Session 快照迁移/保存/导出挂载、交互式内核会话与单元格执行、Notebook 训练执行、SSE、单任务限制、取消、超时、路径穿越、平台闭环执行、执行器状态、静态资源、`.env` 加载、数据集共享、存储占用统计（分类/明细/磁盘）、数据集运行时（`load_dataset` 解析 manifest/groups/分片、共享数据集 `customer_id/名称` 引用、prefixed 产物名、坏行报错）、训练指标、参数回填、环境快照、Docker 沙箱参数/环境剥离/IPC 内核与清理。
+测试覆盖：鉴权（访问令牌 / 用户名密码登录、密码设置与更新、默认空密码）、客户隔离、上传/下载、Notebook 手动新建与编辑、纯脚本存储与 Session 快照迁移/保存/导出挂载、交互式内核会话与单元格执行、Notebook 训练执行、SSE、单任务限制、取消、超时、路径穿越、平台闭环执行、执行器状态、静态资源、`.env` 加载、数据集共享、存储占用统计（分类/明细/磁盘）、数据集运行时（`load_dataset` 解析 manifest/groups/分片、共享数据集 `customer_id/名称` 引用、prefixed 产物名、坏行报错）、训练指标、参数回填、环境快照、Docker 沙箱参数/环境剥离/IPC 内核与清理。
 
 `tests/test_runs.py` 会启动真实 Jupyter 内核执行 Notebook（依赖 venv 中的 `ipykernel`）。
 

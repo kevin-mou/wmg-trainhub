@@ -45,3 +45,15 @@ def truncate(text: str | None, limit: int = 1000) -> str | None:
     if len(text) <= limit:
         return text
     return text[:limit] + "…"
+
+
+MAX_USERNAME_LENGTH = 120
+
+
+def normalize_username(value: str | None) -> str:
+    """登录用户名归一化：去首尾空白、大小写折叠、去掉不可打印字符。
+
+    以归一化后的值落库/查询，保证 SQLite 上大小写不敏感的唯一性。
+    """
+    text = str(value or "").strip().casefold()
+    return "".join(char for char in text if char.isprintable())

@@ -410,7 +410,10 @@ def create_customer(payload: CustomerCreate, db: Database = Depends(get_db)) -> 
     token = (payload.token or "").strip() or new_customer_token()
     if payload.token and db.get_customer_by_token(token):
         raise ApiError("访问令牌已被其他客户使用", 409)
-    customer = db.create_customer(payload.name, payload.email, token)
+    try:
+        customer = db.create_customer(payload.name, payload.email, token, username=payload.username)
+    except ValueError as exc:
+        raise ApiError(str(exc), 409) from exc
     return ok(customer_public(customer, include_token=True), message="客户已创建", code=201)
 
 

@@ -40,6 +40,11 @@ def test_visibility_column_is_added_to_existing_database(tmp_path: Path):
 
     db = Database(path)
     try:
+        customer = db.get_customer("c_old")
+        assert customer is not None
+        # 旧库无用户名/密码：用户名回填为客户 ID，密码为空（仍只能用令牌登录）
+        assert customer["username"] == "c_old"
+        assert customer["password_hash"] is None
         dataset = db.get_dataset("c_old", "ds_old")
         assert dataset is not None
         assert dataset["visibility"] == "private"

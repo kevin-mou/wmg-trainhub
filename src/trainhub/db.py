@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import sqlite3
 import threading
@@ -9,13 +10,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .utils import utc_now
+from .utils import MAX_USERNAME_LENGTH, normalize_username, utc_now
+
+logger = logging.getLogger("trainhub.db")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS customers (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     email TEXT,
+    username TEXT COLLATE NOCASE,
+    password_hash TEXT,
     token TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL,
@@ -157,11 +162,46 @@ class Database:
             ("runs", "dataset_owner_id", "TEXT"),
             ("runs", "dataset_owner_name", "TEXT"),
             ("datasets", "visibility", "TEXT NOT NULL DEFAULT 'private'"),
+            ("customers", "username", "TEXT COLLATE NOCASE"),
+            ("customers", "password_hash", "TEXT"),
         ):
             try:
                 self._execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
             except sqlite3.OperationalError:
                 continue
+        self._backfill_customer_usernames()
+        try:
+            self._execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_username ON customers(username)"
+            )
+        except sqlite3.IntegrityError:
+            logger.warning("客户用户名存在重复，无法创建唯一索引，请手工修正", exc_info=True)
+
+    def _backfill_customer_usernames(self) -> None:
+        """存量客户补齐登录用户名：优先邮箱，冲突或缺失时回退到客户 ID。"""
+        rows = self._query(
+            "SELECT id, email, username FROM customers "
+            "WHERE username IS NULL OR username = '' ORDER BY created_at, id"
+        )
+        if not rows:
+            return
+        used = {
+            normalize_username(row["username"])
+            for row in self._query(
+                "SELECT username FROM customers WHERE username IS NOT NULL AND username <> ''"
+            )
+        }
+        for row in rows:
+            candidate = normalize_username(row.get("email"))
+            if not candidate or len(candidate) > MAX_USERNAME_LENGTH or candidate in used:
+                candidate = normalize_username(row["id"])
+            base = candidate
+            index = 2
+            while candidate in used:
+                candidate = f"{base}-{index}"
+                index += 1
+            self._execute("UPDATE customers SET username = ? WHERE id = ?", (candidate, row["id"]))
+            used.add(candidate)
 
     def ensure_system_customer(self) -> None:
         existing = self._query_one(
@@ -170,9 +210,16 @@ class Database:
         if existing:
             return
         self._execute(
-            "INSERT INTO customers (id, name, email, token, status, created_at) "
-            "VALUES (?, ?, NULL, ?, 'active', ?)",
-            (self.SYSTEM_CUSTOMER_ID, "平台执行任务", "sys_" + secrets.token_hex(16), utc_now()),
+            "INSERT INTO customers "
+            "(id, name, email, username, password_hash, token, status, created_at) "
+            "VALUES (?, ?, NULL, ?, NULL, ?, 'active', ?)",
+            (
+                self.SYSTEM_CUSTOMER_ID,
+                "平台执行任务",
+                normalize_username(self.SYSTEM_CUSTOMER_ID),
+                "sys_" + secrets.token_hex(16),
+                utc_now(),
+            ),
         )
 
     def close(self) -> None:
@@ -198,17 +245,46 @@ class Database:
 
     # ------------------------------------------------------------------ customers
 
-    def create_customer(self, name: str, email: str | None, token: str) -> dict[str, Any]:
+    def create_customer(
+        self,
+        name: str,
+        email: str | None,
+        token: str,
+        *,
+        username: str | None = None,
+        password_hash: str | None = None,
+    ) -> dict[str, Any]:
+        """创建客户；用户名缺省依次取邮箱、客户 ID，密码缺省为空（仅令牌登录）。"""
+        raw_username = str(username or "").strip()
+        explicit = normalize_username(raw_username)
+        if raw_username and not explicit:
+            raise ValueError("用户名不能为空")
+        if explicit and len(explicit) > MAX_USERNAME_LENGTH:
+            raise ValueError(f"用户名不能超过 {MAX_USERNAME_LENGTH} 个字符")
         now = utc_now()
         for _ in range(5):
             customer_id = "c_" + secrets.token_hex(4)
+            candidate = explicit
+            if not candidate:
+                candidate = normalize_username(email)
+                if (
+                    not candidate
+                    or len(candidate) > MAX_USERNAME_LENGTH
+                    or self.get_customer_by_username(candidate)
+                ):
+                    candidate = normalize_username(customer_id)
+            elif self.get_customer_by_username(candidate):
+                raise ValueError("用户名已被使用")
             try:
                 self._execute(
-                    "INSERT INTO customers (id, name, email, token, status, created_at) "
-                    "VALUES (?, ?, ?, ?, 'active', ?)",
-                    (customer_id, name, email, token, now),
+                    "INSERT INTO customers "
+                    "(id, name, email, username, password_hash, token, status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
+                    (customer_id, name, email, candidate, password_hash, token, now),
                 )
-            except sqlite3.IntegrityError:
+            except sqlite3.IntegrityError as exc:
+                if explicit and self.get_customer_by_username(explicit):
+                    raise ValueError("用户名已被使用") from exc
                 continue
             return self.get_customer(customer_id)  # type: ignore[return-value]
         raise RuntimeError("无法生成唯一的客户 ID，请重试")
@@ -219,15 +295,33 @@ class Database:
     def get_customer_by_token(self, token: str) -> dict[str, Any] | None:
         return self._query_one("SELECT * FROM customers WHERE token = ?", (token,))
 
+    def get_customer_by_username(self, username: str | None) -> dict[str, Any] | None:
+        normalized = normalize_username(username)
+        if not normalized:
+            return None
+        return self._query_one("SELECT * FROM customers WHERE username = ?", (normalized,))
+
+    def set_customer_password(
+        self, customer_id: str, password_hash: str | None
+    ) -> dict[str, Any] | None:
+        self._execute(
+            "UPDATE customers SET password_hash = ? WHERE id = ?",
+            (password_hash, customer_id),
+        )
+        return self.get_customer(customer_id)
+
     def list_customers(
         self, page: int, size: int, q: str | None = None
     ) -> tuple[list[dict[str, Any]], int]:
         clauses = ["c.id <> ?"]
         params: list[Any] = [self.SYSTEM_CUSTOMER_ID]
         if q:
-            clauses.append("(c.name LIKE ? OR c.id LIKE ? OR COALESCE(c.email, '') LIKE ?)")
+            clauses.append(
+                "(c.name LIKE ? OR c.id LIKE ? OR COALESCE(c.email, '') LIKE ? "
+                "OR COALESCE(c.username, '') LIKE ?)"
+            )
             like = f"%{q.strip()}%"
-            params.extend([like, like, like])
+            params.extend([like, like, like, like])
         where = f"WHERE {' AND '.join(clauses)}"
         total_row = self._query_one(f"SELECT COUNT(*) AS n FROM customers c {where}", params)
         total = int(total_row["n"]) if total_row else 0

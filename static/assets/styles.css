@@ -176,6 +176,12 @@ button {
   outline-offset: 2px;
 }
 
+/* 作者样式里的 display（如 .field { display:flex }）会覆盖浏览器对
+   [hidden] 的默认 display:none；统一兜底，避免隐藏元素仍然可见。 */
+[hidden] {
+  display: none !important;
+}
+
 ::selection {
   background: var(--brass-soft);
   color: var(--ink);
@@ -3052,8 +3058,12 @@ dialog::backdrop {
 .login-card .login-sub {
   font-size: 13px;
   color: var(--ink-3);
-  margin: 0 0 24px;
+  margin: 0 0 18px;
   line-height: 1.55;
+}
+
+.login-mode {
+  margin-bottom: 10px;
 }
 
 .token-field {
