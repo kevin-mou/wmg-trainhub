@@ -2229,8 +2229,16 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  flex: none;
+  white-space: nowrap;
   font-size: 12.5px;
   color: var(--ink-3);
+}
+
+.back-link svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
 }
 
 .back-link:hover {
@@ -2261,10 +2269,28 @@ button {
 }
 
 .run-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
+  display: flex;
+  align-items: stretch;
   gap: 20px;
-  align-items: start;
+}
+
+.run-task-panel {
+  margin-top: 20px;
+}
+
+.task-json {
+  margin: 10px 0 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  tab-size: 2;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .metrics-panel {
@@ -2362,6 +2388,10 @@ button {
 }
 
 .log-panel {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   overflow: hidden;
@@ -2428,7 +2458,8 @@ button {
 }
 
 .log-view {
-  height: min(62vh, 720px);
+  position: absolute;
+  inset: 0;
   overflow: auto;
   padding: 14px 16px 20px;
   color: var(--log-ink);
@@ -2455,9 +2486,13 @@ button {
 
 .log-wrap {
   position: relative;
+  flex: 1 1 0;
+  min-height: 0;
 }
 
 .run-meta {
+  flex: 0 0 340px;
+  width: 340px;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -3275,10 +3310,17 @@ dialog::backdrop {
 
 @media (max-width: 1120px) {
   .run-layout {
-    grid-template-columns: minmax(0, 1fr);
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .log-panel {
+    min-height: min(62vh, 720px);
   }
 
   .run-meta {
+    flex: none;
+    width: 100%;
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   }

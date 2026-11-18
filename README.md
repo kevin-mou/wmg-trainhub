@@ -363,7 +363,7 @@ data/customers/<customer>/runs/<run>/
 ### 5.2 执行语义
 
 - 按 Notebook 顺序执行代码单元格；**遇到第一个异常即停止**，任务标记为失败，退出码 `1`，日志保留完整 traceback。
-- 日志逐行带 UTC 时间戳，包含单元格边界与耗时、标准输出、`execute_result` 的文本表示、异常 traceback；超过 `TRAINHUB_MAX_LOG_MB` 后截断并注明。
+- 日志逐行带时间戳（服务所在主机的本地时区），包含单元格边界与耗时、标准输出、`execute_result` 的文本表示、异常 traceback；超过 `TRAINHUB_MAX_LOG_MB` 后截断并注明。
 - `TRAINHUB_RUN_TIMEOUT_SECONDS` / 任务级 `timeoutSeconds` 是整体时限，超时会终止内核；`TRAINHUB_CELL_TIMEOUT_SECONDS` 是单元格时限。两者默认 `0`（不限制）。
 - 任务结束后默认清理 `work/`、`home/`、`tmp/`，只保留日志、环境快照与 `output/`；设 `TRAINHUB_KEEP_RUN_WORKDIR=true` 可保留现场（会占用更多磁盘）。
 - 平台任务执行完会回收 `executions/<run>/` 下的输入包；代码/数据版本在控制面，不在节点重复保存。

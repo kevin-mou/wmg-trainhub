@@ -1151,6 +1151,21 @@ def output_file(
     return path, path.name, "application/octet-stream"
 
 
+def _newest_output_mtime(output_dir: Path) -> float:
+    """产物目录内文件的最新 mtime（不跟随符号链接）。"""
+    newest = 0.0
+    for current, dirs, files in os.walk(output_dir, followlinks=False):
+        dirs[:] = [d for d in dirs if not (Path(current) / d).is_symlink()]
+        for name in files:
+            path = Path(current) / name
+            try:
+                if path.is_file() and not path.is_symlink():
+                    newest = max(newest, path.stat().st_mtime)
+            except OSError:
+                continue
+    return newest
+
+
 def output_zip(
     *, storage: Storage, customer: dict[str, Any], run: dict[str, Any]
 ) -> tuple[Path, str]:
@@ -1165,7 +1180,16 @@ def output_zip(
     if not files:
         raise ApiError("该训练任务没有产物", 404)
     zip_path = output_dir.parent / "output.zip"
-    build_zip(output_dir, zip_path)
+    # 缓存：zip 不旧于产物目录里的最新文件时直接复用，避免每次下载都重打包
+    # 数百 MB（分块/断点续传会产生多次下载请求）。build_zip 本身是原子写。
+    try:
+        fresh = zip_path.is_file() and zip_path.stat().st_mtime >= _newest_output_mtime(
+            output_dir
+        )
+    except OSError:
+        fresh = False
+    if not fresh:
+        build_zip(output_dir, zip_path)
     return zip_path, f"{_download_stem(run['name'])}-outputs.zip"
 
 

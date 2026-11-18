@@ -14,6 +14,22 @@ import {
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
+function prettyJson(value) {
+  let parsed = value;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return parsed;
+    }
+  }
+  try {
+    return JSON.stringify(parsed, null, 2) ?? String(parsed);
+  } catch {
+    return String(parsed);
+  }
+}
+
 export async function renderRunDetail(root, ctx) {
   const runId = ctx.params.id;
   let disposed = false;
@@ -99,7 +115,13 @@ export async function renderRunDetail(root, ctx) {
           </div>
         </div>
       </aside>
-    </div>`;
+    </div>
+    <section class="panel run-task-panel" id="task-panel" hidden>
+      <div class="meta-section">
+        <div class="meta-title">${escapeHtml(t("runDetail.task"))}</div>
+        <pre class="task-json" id="task-json"></pre>
+      </div>
+    </section>`;
 
   const refs = {
     name: root.querySelector("#run-name"),
@@ -121,6 +143,8 @@ export async function renderRunDetail(root, ctx) {
     params: root.querySelector("#meta-params"),
     outputs: root.querySelector("#meta-outputs"),
     zip: root.querySelector("#outputs-zip"),
+    taskPanel: root.querySelector("#task-panel"),
+    taskJson: root.querySelector("#task-json"),
   };
 
   const nearBottom = () =>
@@ -288,7 +312,14 @@ export async function renderRunDetail(root, ctx) {
     }
 
     const params = run.parameters || {};
-    const entries = Object.entries(params);
+    const hasTask = Object.prototype.hasOwnProperty.call(params, "task");
+    refs.taskPanel.hidden = !hasTask;
+    const taskText = hasTask ? prettyJson(params.task) : "";
+    if (refs.taskJson.textContent !== taskText) {
+      refs.taskJson.textContent = taskText;
+    }
+
+    const entries = Object.entries(params).filter(([key]) => key !== "task");
     refs.params.innerHTML = entries.length
       ? entries
           .map(
@@ -300,7 +331,9 @@ export async function renderRunDetail(root, ctx) {
             </div>`
           )
           .join("")
-      : `<div class="meta-empty">${escapeHtml(t("runDetail.noParams"))}</div>`;
+      : `<div class="meta-empty">${escapeHtml(
+          t(hasTask ? "runDetail.noOtherParams" : "runDetail.noParams")
+        )}</div>`;
 
     const files = (run.outputs && run.outputs.files) || [];
     refs.outputs.innerHTML = files.length

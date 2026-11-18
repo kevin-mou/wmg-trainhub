@@ -159,7 +159,9 @@ class RunLogWriter:
 
     @staticmethod
     def _stamp() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S ")
+        # 日志是给人看的原始文本，按服务所在主机的本地时间打戳；
+        # 任务/接口时间仍统一用 UTC ISO（见 utils.utc_now）。
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S ")
 
     def _write(self, text: str) -> None:
         if self._truncated or not text:
@@ -203,6 +205,19 @@ class RunLogWriter:
 def _format_exception(exc: BaseException) -> str:
     text = str(exc).strip() or exc.__class__.__name__
     return truncate(_strip_ansi(text), _MESSAGE_LIMIT) or exc.__class__.__name__
+
+
+def _format_local_time(value: str | None) -> str:
+    """把接口/DB 里的 UTC ISO 时间转成日志阅读用的本地时间。"""
+    if not value:
+        return "—"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class RunExecutor:
@@ -369,7 +384,7 @@ class RunExecutor:
             if run.get("dataset_owner_id") and run["dataset_owner_id"] != run["customer_id"]:
                 dataset_label += f"（来自 {run.get('dataset_owner_name') or '其他客户'}）"
             writer.line(f"数据集：{dataset_label}")
-            writer.line(f"提交时间：{run['created_at']}")
+            writer.line(f"提交时间：{_format_local_time(run.get('created_at'))}")
 
             bits = _jupyter_bits()
             nbformat = bits.nbformat
